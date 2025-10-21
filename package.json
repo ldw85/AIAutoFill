@@ -1,0 +1,11 @@
+{
+  "name": "aiautofill",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Auto fill a form with AI — includes encrypted storage with passphrase-derived keys",
+  "license": "MIT",
+  "type": "module",
+  "dependencies": {
+    "zod": "^3.23.8"
+  }
+}

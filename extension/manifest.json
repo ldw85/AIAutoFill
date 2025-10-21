@@ -1,0 +1,17 @@
+{
+  "manifest_version": 3,
+  "name": "AIAutoFill",
+  "version": "0.1.0",
+  "description": "Auto fill a form with AI. Implements encrypted local storage with passphrase-derived keys.",
+  "permissions": [
+    "storage"
+  ],
+  "options_ui": {
+    "page": "options.html",
+    "open_in_tab": true
+  },
+  "icons": {},
+  "action": {
+    "default_title": "AIAutoFill"
+  }
+}

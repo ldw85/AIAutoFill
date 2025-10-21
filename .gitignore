@@ -1,0 +1,16 @@
+# Node and tooling
+node_modules/
+.DS_Store
+coverage/
+dist/
+build/
+.tmp/
+*.log
+
+# Editor
+.vscode/
+.idea/
+*.swp
+
+# OS
+Thumbs.db
