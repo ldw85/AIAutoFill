@@ -1,6 +1,22 @@
 import { startDomScanner } from './domScanner';
+import App from './ui/App.svelte';
+import { setKeys, updateScan, refreshHighlights } from './ui/state';
+import { DEFAULT_KEYS, DEFAULT_VALUES, SYNONYMS_OVERLAY } from './ui/keys';
 
 console.info('AIAutoFill content script loaded');
+
+// Mount overlay UI
+const host = document.createElement('div');
+host.id = 'aiaf-overlay-host';
+document.documentElement.appendChild(host);
+const app = new App({ target: host });
+void app;
+
+// Initialize keys with default values
+setKeys(
+  DEFAULT_KEYS.map((k) => ({ key: k, value: DEFAULT_VALUES[k.key] })),
+  { synonyms: SYNONYMS_OVERLAY }
+);
 
 const scanner = startDomScanner({
   throttleMs: 600,
@@ -15,6 +31,10 @@ const scanner = startDomScanner({
     );
     const w = window as unknown as Record<string, unknown>;
     w.__AIAutoFill_lastScan__ = result;
+
+    // feed into UI state and refresh highlights
+    updateScan(result, { synonyms: SYNONYMS_OVERLAY });
+    refreshHighlights();
   }
 });
 
