@@ -67,6 +67,30 @@ Default config is exported as `DEFAULT_MATCHER_CONFIG`, which includes:
 
 You can pass a partial override to any matcher function to adjust behavior per use case.
 
+### Optional semantic matching (external embeddings)
+
+The extension can optionally use an external embeddings API (MiniLM/TinyBERT or compatible) to add a semantic matching contribution and rerank results. This is disabled by default.
+
+When enabled, only minimal context (labels only) is sent to the embeddings service:
+- Ontology key labels (e.g., "Email", "Phone")
+- Detected field labels (accessible names) from the page
+
+No field values or broader page content is sent. Requests are batched and embeddings are cached in-memory with a TTL. If the service is unavailable or offline, the extension gracefully falls back to local heuristics.
+
+Configure via environment variables (Vite dev/build):
+- `VITE_SEMANTIC_ENABLED=true` — enable semantic matching
+- `VITE_EMBEDDINGS_URL=https://your-embeddings-endpoint` — POST endpoint that returns embeddings
+- `VITE_EMBEDDINGS_MODEL=MiniLM` — optional model name (`MiniLM`/`TinyBERT`/custom)
+- `VITE_EMBEDDINGS_API_KEY=...` — optional bearer token
+- `VITE_EMBEDDINGS_BATCH_SIZE=64` — optional batch size
+- `VITE_EMBEDDINGS_TIMEOUT_MS=4000` — optional request timeout
+- `VITE_EMBEDDINGS_CACHE_TTL_MS=86400000` — optional cache TTL (ms)
+- `VITE_SEMANTIC_WEIGHT=0.6` — optional weight for semantic contribution [0..1]
+
+API contract (flexible): The endpoint should accept a JSON payload like `{ model, input: string[] }` and return either `{ embeddings: number[][] }`, `{ vectors: number[][] }`, or `{ data: [{ embedding: number[] }, ...] }` with one vector per input string.
+
+See PRIVACY.md for details about privacy, batching, and offline behavior.
+
 ## Universal Data Ontology (Zod)
 
 A universal, extensible ontology covering Identity, Contact, Address, Organization, WebPresence, SEO, BusinessListing, Message, Credentials, and Custom is available under `src/lib/universal.ts` and exported from `src/lib/index.ts`.
