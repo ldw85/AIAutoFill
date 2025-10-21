@@ -1,11 +1,37 @@
 {
   "name": "aiautofill",
-  "version": "0.1.0",
+  "version": "0.0.0",
   "private": true,
-  "description": "Auto fill a form with AI — includes encrypted storage with passphrase-derived keys",
+  "description": "Auto fill a form with AI — includes encrypted storage with passphrase-derived keys，Chrome MV3 extension scaffold using Vite + Svelte + TypeScript",
   "license": "MIT",
   "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview",
+    "lint": "eslint . --ext .ts,.js,.svelte",
+    "format": "prettier --write ."
+  },
+  "engines": {
+    "node": ">=18"
+  },
   "dependencies": {
+    "svelte": "^4.2.0",
     "zod": "^3.23.8"
+  },
+  "devDependencies": {
+    "@crxjs/vite-plugin": "^2.0.0",
+    "@sveltejs/vite-plugin-svelte": "^3.0.0",
+    "@types/chrome": "^0.0.269",
+    "@typescript-eslint/eslint-plugin": "^7.4.0",
+    "@typescript-eslint/parser": "^7.4.0",
+    "eslint": "^8.57.0",
+    "eslint-config-prettier": "^9.1.0",
+    "eslint-plugin-svelte": "^2.42.0",
+    "prettier": "^3.3.3",
+    "prettier-plugin-svelte": "^3.2.5",
+    "svelte-eslint-parser": "^0.41.0",
+    "typescript": "^5.4.0",
+    "vite": "^5.4.0"
   }
 }
