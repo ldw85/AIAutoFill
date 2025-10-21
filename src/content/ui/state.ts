@@ -120,6 +120,12 @@ function getOriginalValue(el: HTMLElement): unknown {
   return el.textContent;
 }
 
+export function readCandidateValue(cand: Candidate): unknown {
+  const el = getElementForCandidate(cand);
+  if (!el) return null;
+  return getOriginalValue(el);
+}
+
 function setHighlight(el: HTMLElement, status?: UIStatus) {
   el.classList.remove('aiaf-highlight-pending', 'aiaf-highlight-uncertain', 'aiaf-highlight-filled');
   if (!status) return;
