@@ -67,3 +67,69 @@ Default config is exported as `DEFAULT_MATCHER_CONFIG`, which includes:
 
 You can pass a partial override to any matcher function to adjust behavior per use case.
 
+## Universal Data Ontology (Zod)
+
+A universal, extensible ontology covering Identity, Contact, Address, Organization, WebPresence, SEO, BusinessListing, Message, Credentials, and Custom is available under `src/lib/universal.ts` and exported from `src/lib/index.ts`.
+
+Example:
+
+```ts
+import { IdentitySchema, UniversalDataSchema } from './src/lib';
+
+const identity = IdentitySchema.parse({ firstName: 'Ada', lastName: 'Lovelace' });
+
+const data = UniversalDataSchema.parse({
+  identity,
+  contact: { email: 'ada@example.org' },
+  webPresence: { websiteUrl: 'https://example.org' }
+});
+```
+
+## Synonyms and Aliases (multilingual)
+
+Multilingual synonym maps and field aliases for canonical field paths live in `src/lib/synonyms.ts`.
+
+- `UNIVERSAL_SYNONYMS`: default mappings
+- `buildAliasIndex(map, locale?)`: build a fast lookup index
+- `resolveCanonical(name, locale?)`: resolve a label/alias to a canonical field path
+
+```ts
+import { resolveCanonical } from './src/lib';
+
+resolveCanonical('Correo electrónico', 'es'); // => 'contact.email'
+```
+
+## Normalization utilities
+
+Utilities for email, URL, and phone normalization are provided in `src/lib/normalize.ts`.
+
+```ts
+import { normalizeEmail, normalizeUrl, normalizePhone, normalizeByFieldPath } from './src/lib';
+
+normalizeEmail('  MAILTO:User@Example.COM  '); // 'user@example.com'
+normalizeUrl('example.com/?utm_source=x#frag'); // 'https://example.com/'
+normalizePhone('(415) 555-1212', { defaultCountry: 'US' }); // '+14155551212'
+normalizeByFieldPath('contact.email', ' User@Example.com '); // 'user@example.com'
+```
+
+## Scenario profiles (declarative overlays)
+
+Two scenario profiles are defined in `src/lib/profiles.ts`:
+- `WebsiteSubmission` — typical website contact forms (requires `message.body` and `contact.email`)
+- `JobApplication` — job application forms (requires identity + contact basics)
+
+Each profile exposes:
+- `required`: canonical field paths that should be populated
+- `preferred`: additional, nice-to-have fields
+- `synonymsOverlay`: additional aliases to aid matching in that scenario
+
+APIs:
+
+```ts
+import { SCENARIO_PROFILES, profileSchema, applyProfileSynonyms, UNIVERSAL_SYNONYMS } from './src/lib';
+
+const profile = SCENARIO_PROFILES.WebsiteSubmission;
+const schema = profileSchema(profile); // Zod schema with required groups
+const synonymsForScenario = applyProfileSynonyms(UNIVERSAL_SYNONYMS, profile);
+```
+
