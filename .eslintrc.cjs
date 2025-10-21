@@ -6,6 +6,15 @@ module.exports = {
     sourceType: 'module',
     extraFileExtensions: ['.svelte']
   },
+  env: {
+    browser: true,
+    es2021: true,
+    webextensions: true,
+    worker: true
+  },
+  globals: {
+    chrome: 'readonly'
+  },
   plugins: ['@typescript-eslint', 'svelte'],
   extends: [
     'eslint:recommended',

@@ -14,12 +14,5 @@ export default defineConfig({
     target: 'es2020',
     outDir: 'dist',
     sourcemap: true,
-    rollupOptions: {
-      // Allow building HTML entry points for popup and options
-      input: {
-        popup: 'src/popup/index.html',
-        options: 'src/options/index.html',
-      },
-    },
   },
 });
