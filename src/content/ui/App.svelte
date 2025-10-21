@@ -1,7 +1,7 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import FAB from './FAB.svelte';
-  import PreviewPanel from './PreviewPanel.svelte';
+  import ManagementPanel from './ManagementPanel.svelte';
   import FieldBadge from './FieldBadge.svelte';
   import { ensureOverlayStyles } from './styles';
   import { panelOpen, candidatesView, keys } from './state';
@@ -29,6 +29,6 @@
   </div>
   <FAB />
   {#if $panelOpen}
-    <PreviewPanel />
+    <ManagementPanel />
   {/if}
 </div>
