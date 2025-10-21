@@ -46,6 +46,8 @@ export interface MatcherWeights {
   regexConstraint: number; // default 0.5
   schemaHint: number; // default 0.3
   fuzzy: number; // default 0.7
+  // Optional semantic matching weight; only used when semantic matching is enabled
+  semantic?: number;
 }
 
 export interface MatcherConfig {

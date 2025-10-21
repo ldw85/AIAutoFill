@@ -6,7 +6,7 @@ import {
 } from './ontology';
 
 export interface HeuristicContribution {
-  id: 'autocomplete' | 'alias' | 'type' | 'regex' | 'schema' | 'fuzzy';
+  id: 'autocomplete' | 'alias' | 'type' | 'regex' | 'schema' | 'fuzzy' | 'semantic';
   score: number; // 0..1
   weight: number; // weight applied
   weightedScore: number; // score * weight

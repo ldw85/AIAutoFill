@@ -3,6 +3,7 @@ import type { Candidate, ScanResult } from '../domScanner';
 import type { OntologyKey } from '../../lib/ontology';
 import { DEFAULT_MATCHER_CONFIG, type MatcherConfig } from '../../lib/ontology';
 import { computeBatchMatches, type BatchMatchResult, type MatchResult } from '../../lib/fieldMatcher';
+import { rerankWithSemantics, type SemanticConfig, logSemanticPrivacyNoticeOnce } from '../../lib/semantic';
 import { fillElement, type FillResult } from '../filler';
 
 export type UIStatus = 'pending' | 'filled' | 'uncertain';
@@ -51,26 +52,33 @@ export const candidatesView = derived([scan, batch, keys], ([$scan, $batch, $key
   return out;
 });
 
-export function setKeys(list: KeyConfig[], cfg?: Partial<MatcherConfig>) {
+export function setKeys(list: KeyConfig[], cfg?: Partial<MatcherConfig> & { semantic?: SemanticConfig }) {
   keys.set(list);
-  recomputeBatch(cfg);
+  void recomputeBatch(cfg);
 }
 
-export function updateScan(result: ScanResult, cfg?: Partial<MatcherConfig>) {
+export function updateScan(result: ScanResult, cfg?: Partial<MatcherConfig> & { semantic?: SemanticConfig }) {
   scan.set(result);
-  recomputeBatch(cfg);
+  void recomputeBatch(cfg);
 }
 
-export function recomputeBatch(cfg?: Partial<MatcherConfig>) {
+export async function recomputeBatch(cfg?: Partial<MatcherConfig> & { semantic?: SemanticConfig }) {
   const s = get(scan);
   const k = get(keys).map((x) => x.key);
   if (!s || k.length === 0) {
     batch.set(null);
     return;
   }
-  const config: MatcherConfig = { ...DEFAULT_MATCHER_CONFIG, ...cfg, thresholds: { ...DEFAULT_MATCHER_CONFIG.thresholds, ...(cfg?.thresholds || {}) }, weights: { ...DEFAULT_MATCHER_CONFIG.weights, ...(cfg?.weights || {}) }, synonyms: { ...DEFAULT_MATCHER_CONFIG.synonyms, ...(cfg?.synonyms || {}) } };
+  const config: MatcherConfig & { semantic?: SemanticConfig } = { ...DEFAULT_MATCHER_CONFIG, ...cfg, thresholds: { ...DEFAULT_MATCHER_CONFIG.thresholds, ...(cfg?.thresholds || {}) }, weights: { ...DEFAULT_MATCHER_CONFIG.weights, ...(cfg?.weights || {}) }, synonyms: { ...DEFAULT_MATCHER_CONFIG.synonyms, ...(cfg?.synonyms || {}) }, semantic: cfg?.semantic } as MatcherConfig & { semantic?: SemanticConfig };
   const b = computeBatchMatches(k, s.candidates, config);
   batch.set(b);
+
+  // Optional semantic reranking (async)
+  if (config.semantic?.enabled && config.semantic.apiUrl) {
+    logSemanticPrivacyNoticeOnce(config.semantic);
+    const reranked = await rerankWithSemantics(b, k, s.candidates, config);
+    batch.set(reranked);
+  }
 }
 
 // Apply/undo manager
