@@ -47,6 +47,7 @@ export interface Candidate {
 export interface ScanResult {
   candidates: Candidate[];
   scannedAt: number;
+  durationMs: number;
 }
 
 export interface DomScannerOptions {
@@ -517,6 +518,13 @@ function nowTs(): number {
   return Date.now();
 }
 
+function nowHighRes(): number {
+  if (typeof performance !== 'undefined' && typeof performance.now === 'function') {
+    return performance.now();
+  }
+  return Date.now();
+}
+
 function uniqueById<T extends { id: string }>(arr: T[]): T[] {
   const seen = new Set<string>();
   const out: T[] = [];
@@ -563,9 +571,15 @@ export function startDomScanner(options: DomScannerOptions = {}): DomScannerCont
   const observedRoots = new WeakSet<Document | ShadowRoot>();
 
   const runScan = () => {
+    const start = nowHighRes();
     const candidates: Candidate[] = [];
     scanRoot(document, [], candidates);
-    const result: ScanResult = { candidates: uniqueById(candidates), scannedAt: nowTs() };
+    const durationMs = Math.max(0, Number((nowHighRes() - start).toFixed(3)));
+    const result: ScanResult = {
+      candidates: uniqueById(candidates),
+      scannedAt: nowTs(),
+      durationMs
+    };
     if (options.onCandidates) options.onCandidates(result);
   };
 
