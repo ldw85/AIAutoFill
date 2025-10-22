@@ -1,8 +1,26 @@
-import { startDomScanner } from './domScanner';
+import { startDomScanner, type Candidate } from './domScanner';
 import App from './ui/App.svelte';
-import { setKeys, updateScan, refreshHighlights } from './ui/state';
+import {
+  keys,
+  updateScan,
+  refreshHighlights,
+  recomputeBatch,
+  applyAll,
+  batch,
+  readCandidateValue,
+  type KeyConfig
+} from './ui/state';
 import { DEFAULT_KEYS, DEFAULT_VALUES, SYNONYMS_OVERLAY } from './ui/keys';
 import type { SemanticConfig } from '../lib/semantic';
+import {
+  loadSettings,
+  normalizeSettings,
+  findTemplate,
+  SETTINGS_STORAGE_KEY,
+  type ExtensionSettings
+} from '../lib/settings';
+import type { BatchMatchResult, MatchResult } from '../lib/fieldMatcher';
+import { get } from 'svelte/store';
 
 console.info('AIAutoFill content script loaded');
 
@@ -13,26 +31,85 @@ document.documentElement.appendChild(host);
 const app = new App({ target: host });
 void app;
 
-// Initialize keys with default values
-const semanticEnabled = (import.meta.env.VITE_SEMANTIC_ENABLED as string) === 'true';
+// Semantic configuration derived from environment + runtime settings
+const envSemanticEnabled = (import.meta.env.VITE_SEMANTIC_ENABLED as string) === 'true';
 const embeddingsUrl = (import.meta.env.VITE_EMBEDDINGS_URL as string) || '';
-const semanticCfg: SemanticConfig | undefined = semanticEnabled && embeddingsUrl
-  ? {
-      enabled: true,
-      apiUrl: embeddingsUrl,
-      model: (import.meta.env.VITE_EMBEDDINGS_MODEL as string) || 'MiniLM',
-      batchSize: Number(import.meta.env.VITE_EMBEDDINGS_BATCH_SIZE || 64),
-      timeoutMs: Number(import.meta.env.VITE_EMBEDDINGS_TIMEOUT_MS || 4000),
-      cacheTtlMs: Number(import.meta.env.VITE_EMBEDDINGS_CACHE_TTL_MS || 24 * 60 * 60 * 1000),
-      weight: Number(import.meta.env.VITE_SEMANTIC_WEIGHT || 0.6),
-      apiKey: (import.meta.env.VITE_EMBEDDINGS_API_KEY as string) || undefined
-    }
-  : undefined;
+const embeddingsModel = (import.meta.env.VITE_EMBEDDINGS_MODEL as string) || 'MiniLM';
+const embeddingsBatchSize = Number(import.meta.env.VITE_EMBEDDINGS_BATCH_SIZE || 64);
+const embeddingsTimeoutMs = Number(import.meta.env.VITE_EMBEDDINGS_TIMEOUT_MS || 4000);
+const embeddingsCacheTtl = Number(import.meta.env.VITE_EMBEDDINGS_CACHE_TTL_MS || 24 * 60 * 60 * 1000);
+const semanticWeight = Number(import.meta.env.VITE_SEMANTIC_WEIGHT || 0.6);
+const embeddingsApiKey = (import.meta.env.VITE_EMBEDDINGS_API_KEY as string) || undefined;
 
-setKeys(
-  DEFAULT_KEYS.map((k) => ({ key: k, value: DEFAULT_VALUES[k.key] })),
-  { synonyms: SYNONYMS_OVERLAY, semantic: semanticCfg }
-);
+let semanticCfg: SemanticConfig | undefined;
+
+function computeSemanticConfig(settings: ExtensionSettings): SemanticConfig | undefined {
+  if (!envSemanticEnabled) return undefined;
+  if (!embeddingsUrl) return undefined;
+  if (settings.offlineMode) return undefined;
+  if (!settings.semanticMatching) return undefined;
+  return {
+    enabled: true,
+    apiUrl: embeddingsUrl,
+    model: embeddingsModel,
+    batchSize: embeddingsBatchSize,
+    timeoutMs: embeddingsTimeoutMs,
+    cacheTtlMs: embeddingsCacheTtl,
+    weight: semanticWeight,
+    apiKey: embeddingsApiKey
+  };
+}
+
+function matcherConfig(): { synonyms: typeof SYNONYMS_OVERLAY; semantic?: SemanticConfig } {
+  return { synonyms: SYNONYMS_OVERLAY, semantic: semanticCfg };
+}
+
+function buildKeyConfigs(values: Record<string, unknown> | undefined, fallbackToDefaults: boolean): KeyConfig[] {
+  return DEFAULT_KEYS.map((ontologyKey) => {
+    const hasOverride = values ? Object.prototype.hasOwnProperty.call(values, ontologyKey.key) : false;
+    if (hasOverride && values) {
+      return { key: ontologyKey, value: values[ontologyKey.key] };
+    }
+    if (fallbackToDefaults) {
+      return { key: ontologyKey, value: DEFAULT_VALUES[ontologyKey.key] };
+    }
+    return { key: ontologyKey, value: undefined };
+  });
+}
+
+function templateValues(settings: ExtensionSettings): Record<string, unknown> | undefined {
+  const template = findTemplate(settings, settings.quickFillTemplateId || settings.quickExtractTemplateId);
+  return template?.values;
+}
+
+function applySettings(settings: ExtensionSettings): void {
+  semanticCfg = computeSemanticConfig(settings);
+  const values = templateValues(settings);
+  const configs = buildKeyConfigs(values, !values);
+  keys.set(configs);
+  void recomputeBatch(matcherConfig());
+  refreshHighlights();
+}
+
+async function initialiseSettings(): Promise<void> {
+  const loaded = await loadSettings();
+  applySettings(loaded);
+}
+
+void initialiseSettings();
+
+chrome.storage.onChanged.addListener((changes, areaName) => {
+  if (areaName !== 'local') return;
+  if (!Object.prototype.hasOwnProperty.call(changes, SETTINGS_STORAGE_KEY)) return;
+  const nextRaw = changes[SETTINGS_STORAGE_KEY]?.newValue as Partial<ExtensionSettings> | null | undefined;
+  const next = normalizeSettings(nextRaw || undefined);
+  applySettings(next);
+});
+
+// Initialize keys with default values immediately for UI responsiveness
+const initialConfigs = buildKeyConfigs(undefined, true);
+keys.set(initialConfigs);
+void recomputeBatch(matcherConfig());
 
 const scanner = startDomScanner({
   throttleMs: 600,
@@ -49,7 +126,7 @@ const scanner = startDomScanner({
     w.__AIAutoFill_lastScan__ = result;
 
     // feed into UI state and refresh highlights
-    updateScan(result, { synonyms: SYNONYMS_OVERLAY, semantic: semanticCfg });
+    updateScan(result, matcherConfig());
     refreshHighlights();
   }
 });
@@ -57,12 +134,78 @@ const scanner = startDomScanner({
 // Expose for debugging
 (window as unknown as Record<string, unknown>).__AIAutoFillScanner__ = scanner;
 
-// Example: respond to messages from the extension
+async function applyTemplate(values: Record<string, unknown> | undefined): Promise<number> {
+  const configs = buildKeyConfigs(values, false);
+  keys.set(configs);
+  await recomputeBatch(matcherConfig());
+  const applied = applyAll();
+  refreshHighlights();
+  return applied;
+}
+
+function bestMatches(): Map<string, MatchResult> {
+  const out = new Map<string, MatchResult>();
+  const currentBatch: BatchMatchResult | null = get(batch);
+  if (!currentBatch) return out;
+  const entries = Object.entries(currentBatch.byKey || {});
+  for (const [key, list] of entries) {
+    if (!Array.isArray(list) || list.length === 0) continue;
+    const best = list[0];
+    if (!best || best.tier === 'reject') continue;
+    out.set(key, best);
+  }
+  return out;
+}
+
+function extractCurrentValues(): Record<string, unknown> {
+  const matches = bestMatches();
+  if (matches.size === 0) return {};
+  const result: Record<string, unknown> = {};
+  for (const [key, match] of matches.entries()) {
+    const value = readCandidateValue(match.candidate);
+    if (value == null) continue;
+    if (typeof value === 'string' && value.trim().length === 0) continue;
+    result[key] = value;
+  }
+  return result;
+}
+
+// Respond to extension messages
 chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
   if (msg?.type === 'GET_PAGE_INFO') {
     const title = document.title;
-    const w = window as unknown as { __AIAutoFill_lastScan__?: { candidates?: unknown[] } };
+    const w = window as unknown as { __AIAutoFill_lastScan__?: { candidates?: Candidate[] } };
     const count = w.__AIAutoFill_lastScan__?.candidates?.length ?? 0;
     sendResponse({ title, candidateCount: count });
+    return;
+  }
+
+  if (msg?.type === 'AIAF_APPLY_TEMPLATE') {
+    void (async () => {
+      try {
+        const values = (msg.values as Record<string, unknown>) || {};
+        const applied = await applyTemplate(values);
+        sendResponse({ type: 'AIAF_APPLY_TEMPLATE_RESULT', applied });
+      } catch (error) {
+        sendResponse({
+          type: 'AIAF_APPLY_TEMPLATE_RESULT',
+          error: error instanceof Error ? error.message : 'Unknown error'
+        });
+      }
+    })();
+    return true;
+  }
+
+  if (msg?.type === 'AIAF_EXTRACT_TEMPLATE') {
+    try {
+      const data = extractCurrentValues();
+      sendResponse({ type: 'AIAF_EXTRACT_TEMPLATE_RESULT', data });
+    } catch (error) {
+      sendResponse({
+        type: 'AIAF_EXTRACT_TEMPLATE_RESULT',
+        error: error instanceof Error ? error.message : 'Unknown error'
+      });
+    }
+    return;
   }
 });
