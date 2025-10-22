@@ -1,9 +1,10 @@
 {
-  "name": "aiautofill-extension",
+  "name": "aiautofill",
   "version": "0.0.0",
   "private": true,
-  "description": "Chrome MV3 extension scaffold using Vite + Svelte + TypeScript",
+  "description": "Auto fill a form with AI — includes encrypted storage with passphrase-derived keys，Chrome MV3 extension scaffold using Vite + Svelte + TypeScript",
   "license": "MIT",
+  "type": "module",
   "scripts": {
     "dev": "vite",
     "build": "vite build",
