@@ -11,6 +11,7 @@
 
 const textEncoder = new TextEncoder();
 const textDecoder = new TextDecoder();
+const decryptedCache = new Map();
 
 function getRandomBytes(length) {
   const bytes = new Uint8Array(length);
@@ -85,21 +86,39 @@ export async function decrypt(bundle, passphrase) {
 
 const KEY_PREFIX = 'enc:';
 
+function collectPrefixedKeys() {
+  const keys = [];
+  for (let i = 0; i < localStorage.length; i += 1) {
+    const candidate = localStorage.key(i);
+    if (candidate && candidate.startsWith(KEY_PREFIX)) {
+      keys.push(candidate);
+    }
+  }
+  return keys;
+}
+
 export async function setItem(key, value, passphrase) {
   const bundle = await encrypt(value, passphrase);
   localStorage.setItem(KEY_PREFIX + key, JSON.stringify(bundle));
+  const serialized = typeof value === 'string' ? value : JSON.stringify(value);
+  decryptedCache.set(key, serialized);
 }
 
 export async function getItem(key, passphrase) {
+  if (decryptedCache.has(key)) {
+    return decryptedCache.get(key);
+  }
   const raw = localStorage.getItem(KEY_PREFIX + key);
   if (!raw) return null;
   const bundle = JSON.parse(raw);
   const plain = await decrypt(bundle, passphrase);
+  decryptedCache.set(key, plain);
   return plain;
 }
 
 export function removeItem(key) {
   localStorage.removeItem(KEY_PREFIX + key);
+  decryptedCache.delete(key);
 }
 
 export function clear() {
@@ -107,13 +126,22 @@ export function clear() {
   for (const k of keys) {
     localStorage.removeItem(k);
   }
+  decryptedCache.clear();
 }
 
 export function listKeys() {
-  const keys = [];
-  for (let i = 0; i < localStorage.length; i += 1) {
-    const k = localStorage.key(i);
-    if (k && k.startsWith(KEY_PREFIX)) keys.push(k);
-  }
-  return keys;
+  return collectPrefixedKeys();
+}
+
+if (
+  typeof globalThis !== 'undefined' &&
+  typeof globalThis.addEventListener === 'function' &&
+  typeof localStorage !== 'undefined'
+) {
+  globalThis.addEventListener('storage', (storageEvent) => {
+    if (storageEvent.storageArea !== localStorage) return;
+    const { key } = storageEvent;
+    if (!key || !key.startsWith(KEY_PREFIX)) return;
+    decryptedCache.delete(key.slice(KEY_PREFIX.length));
+  });
 }
