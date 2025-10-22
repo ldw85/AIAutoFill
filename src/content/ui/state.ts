@@ -1,7 +1,12 @@
 import { writable, derived, get } from 'svelte/store';
 import type { Candidate, ScanResult } from '../domScanner';
 import type { OntologyKey } from '../../lib/ontology';
-import { DEFAULT_MATCHER_CONFIG, type MatcherConfig } from '../../lib/ontology';
+import {
+  DEFAULT_MATCHER_CONFIG,
+  type MatcherConfig,
+  type PreferenceMap,
+  type PreferenceRecord
+} from '../../lib/ontology';
 import { computeBatchMatches, type BatchMatchResult, type MatchResult } from '../../lib/fieldMatcher';
 import { rerankWithSemantics, type SemanticConfig, logSemanticPrivacyNoticeOnce } from '../../lib/semantic';
 import { fillElement, type FillResult } from '../filler';
@@ -29,6 +34,87 @@ export const panelOpen = writable(false);
 export const keys = writable<KeyConfig[]>([]);
 export const scan = writable<ScanResult | null>(null);
 export const batch = writable<BatchMatchResult | null>(null);
+
+interface LearningState {
+  synonyms: Record<string, string[]>;
+  preferences: PreferenceMap;
+}
+
+const defaultLearningState: LearningState = { synonyms: {}, preferences: {} };
+
+export const learningConfig = writable<LearningState>(defaultLearningState);
+
+export function getLearningState(): LearningState {
+  return get(learningConfig);
+}
+
+export function setLearningState(state: LearningState, options?: { recompute?: boolean }) {
+  learningConfig.set(state);
+  if (options?.recompute !== false) void recomputeBatch();
+}
+
+export function updateLearningState(partial: Partial<LearningState>, options?: { recompute?: boolean }) {
+  learningConfig.update((prev) => ({
+    synonyms: partial.synonyms ?? prev.synonyms,
+    preferences: partial.preferences ?? prev.preferences
+  }));
+  if (options?.recompute !== false) void recomputeBatch();
+}
+
+function mergeSynonymSources(...sources: Array<Record<string, string[]> | undefined>): Record<string, string[]> {
+  const result: Record<string, string[]> = {};
+  for (const src of sources) {
+    if (!src) continue;
+    for (const [key, list] of Object.entries(src)) {
+      if (!Array.isArray(list) || list.length === 0) continue;
+      const existing = result[key] || [];
+      const merged = [...existing, ...list]
+        .map((value) => (value ?? '').toString().trim())
+        .filter((value) => value.length > 0);
+      result[key] = Array.from(new Set(merged));
+    }
+  }
+  return result;
+}
+
+function mergePreferenceSources(...sources: Array<PreferenceMap | undefined>): PreferenceMap {
+  const result: PreferenceMap = {};
+  for (const src of sources) {
+    if (!src) continue;
+    for (const [label, entries] of Object.entries(src)) {
+      if (!Array.isArray(entries) || entries.length === 0) continue;
+      if (!result[label]) result[label] = [];
+      result[label].push(...entries);
+    }
+  }
+  for (const [label, entries] of Object.entries(result)) {
+    const byKey = new Map<string, PreferenceRecord>();
+    for (const entry of entries) {
+      if (!entry?.key) continue;
+      const existing = byKey.get(entry.key);
+      if (!existing) {
+        byKey.set(entry.key, { ...entry });
+        continue;
+      }
+      const existingWeight = existing.weight ?? 0;
+      const incomingWeight = entry.weight ?? 0;
+      if (
+        incomingWeight > existingWeight ||
+        (incomingWeight === existingWeight && (entry.updatedAt ?? 0) > (existing.updatedAt ?? 0))
+      ) {
+        byKey.set(entry.key, { ...entry });
+      }
+    }
+    const merged = Array.from(byKey.values());
+    merged.sort(
+      (a, b) =>
+        (b.weight ?? 0) - (a.weight ?? 0) ||
+        (b.updatedAt ?? 0) - (a.updatedAt ?? 0)
+    );
+    result[label] = merged;
+  }
+  return result;
+}
 
 export const candidatesView = derived([scan, batch, keys], ([$scan, $batch, $keys]) => {
   const out: CandidateView[] = [];
@@ -69,7 +155,26 @@ export async function recomputeBatch(cfg?: Partial<MatcherConfig> & { semantic?:
     batch.set(null);
     return;
   }
-  const config: MatcherConfig & { semantic?: SemanticConfig } = { ...DEFAULT_MATCHER_CONFIG, ...cfg, thresholds: { ...DEFAULT_MATCHER_CONFIG.thresholds, ...(cfg?.thresholds || {}) }, weights: { ...DEFAULT_MATCHER_CONFIG.weights, ...(cfg?.weights || {}) }, synonyms: { ...DEFAULT_MATCHER_CONFIG.synonyms, ...(cfg?.synonyms || {}) }, semantic: cfg?.semantic } as MatcherConfig & { semantic?: SemanticConfig };
+  const learning = get(learningConfig);
+  const synonyms = mergeSynonymSources(
+    DEFAULT_MATCHER_CONFIG.synonyms,
+    cfg?.synonyms,
+    learning.synonyms
+  );
+  const preferences = mergePreferenceSources(
+    DEFAULT_MATCHER_CONFIG.preferences,
+    cfg?.preferences,
+    learning.preferences
+  );
+  const config: MatcherConfig & { semantic?: SemanticConfig } = {
+    ...DEFAULT_MATCHER_CONFIG,
+    ...cfg,
+    thresholds: { ...DEFAULT_MATCHER_CONFIG.thresholds, ...(cfg?.thresholds || {}) },
+    weights: { ...DEFAULT_MATCHER_CONFIG.weights, ...(cfg?.weights || {}) },
+    synonyms,
+    preferences,
+    semantic: cfg?.semantic
+  } as MatcherConfig & { semantic?: SemanticConfig };
   const b = computeBatchMatches(k, s.candidates, config);
   batch.set(b);
 
@@ -142,6 +247,14 @@ export function applyCandidate(cand: Candidate, match: MatchResult, value: unkno
   if (res.changed) {
     applied.set(cand.id, { id: cand.id, original: orig, appliedValue: value });
     setHighlight(el, 'filled');
+    void import('../learning')
+      .then(({ recordAppliedMatch }) => {
+        if (typeof recordAppliedMatch === 'function') {
+          return recordAppliedMatch(match);
+        }
+        return undefined;
+      })
+      .catch(() => undefined);
   }
   return res;
 }

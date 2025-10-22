@@ -2,11 +2,12 @@ import type { Candidate } from '../content/domScanner';
 import {
   DEFAULT_MATCHER_CONFIG,
   type MatcherConfig,
-  type OntologyKey
+  type OntologyKey,
+  type PreferenceMap
 } from './ontology';
 
 export interface HeuristicContribution {
-  id: 'autocomplete' | 'alias' | 'type' | 'regex' | 'schema' | 'fuzzy' | 'semantic';
+  id: 'autocomplete' | 'alias' | 'preference' | 'type' | 'regex' | 'schema' | 'fuzzy' | 'semantic';
   score: number; // 0..1
   weight: number; // weight applied
   weightedScore: number; // score * weight
@@ -35,6 +36,16 @@ export interface MatchResult {
 }
 
 function normalize(str: string): string {
+  return str
+    .toLowerCase()
+    .normalize('NFD')
+    .replace(/\p{Diacritic}/gu, '')
+    .replace(/[_-]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function normalizeLabelForPreference(str: string): string {
   return str
     .toLowerCase()
     .normalize('NFD')
@@ -175,6 +186,41 @@ function schemaHintScore(key: OntologyKey, texts: string[], synonyms: Record<str
     }
   }
   return { score: Math.min(best, 1), matched };
+}
+
+function preferenceMatchScore(
+  key: OntologyKey,
+  bucket: Record<string, string>,
+  preferences: PreferenceMap | undefined
+): { score: number; evidence: Record<string, unknown>; hasPreference: boolean } {
+  if (!preferences || Object.keys(preferences).length === 0) return { score: 0, evidence: {}, hasPreference: false };
+  const labels = truthyStrings([
+    bucket.label,
+    bucket.placeholder,
+    bucket['aria-label'],
+    bucket.title,
+    bucket.name,
+    bucket.id
+  ]);
+  let best = 0;
+  let hasPreference = false;
+  const evidence: Record<string, unknown> = {};
+  for (const label of labels) {
+    const norm = normalizeLabelForPreference(label);
+    if (!norm) continue;
+    const entries = preferences[norm];
+    if (!entries || entries.length === 0) continue;
+    hasPreference = true;
+    const match = entries.find((entry) => entry.key === key.key);
+    if (!match) continue;
+    const score = Math.min(1, Math.log1p(Math.max(0, match.weight)) / Math.log1p(5));
+    if (score > best) {
+      best = score;
+      evidence.label = label;
+      evidence.weight = match.weight;
+    }
+  }
+  return { score: best, evidence, hasPreference };
 }
 
 function typeConstraintScore(key: OntologyKey, candidate: Candidate): { score: number; evidence: Record<string, unknown> } {
@@ -326,21 +372,30 @@ export function rankCandidatesForKey(
       contr.push({ id: 'alias', score: r.score, weight: config.weights.deterministicAlias, weightedScore, evidence: { matched: r.matched } });
     }
 
-    // 3) type constraint
+    // 3) learned mapping preferences
+    {
+      const r = preferenceMatchScore(key, bucket, config.preferences);
+      const baseWeight = config.weights.preference ?? 0;
+      const weight = r.hasPreference ? baseWeight : 0;
+      const weightedScore = r.score * weight;
+      contr.push({ id: 'preference', score: r.score, weight, weightedScore, evidence: r.evidence });
+    }
+
+    // 4) type constraint
     {
       const r = typeConstraintScore(key, cand);
       const weightedScore = r.score * config.weights.typeConstraint;
       contr.push({ id: 'type', score: r.score, weight: config.weights.typeConstraint, weightedScore, evidence: r.evidence });
     }
 
-    // 4) regex constraint
+    // 5) regex constraint
     {
       const r = regexConstraintScore(key, cand);
       const weightedScore = r.score * config.weights.regexConstraint;
       contr.push({ id: 'regex', score: r.score, weight: config.weights.regexConstraint, weightedScore, evidence: r.evidence });
     }
 
-    // 5) schema hints (synonyms/token overlap)
+    // 6) schema hints (synonyms/token overlap)
     {
       const texts = truthyStrings([bucket.id, bucket.name, bucket.class, bucket.label, bucket.placeholder, bucket['aria-label'], bucket.title]);
       const r = schemaHintScore(key, texts, config.synonyms);
@@ -348,7 +403,7 @@ export function rankCandidatesForKey(
       contr.push({ id: 'schema', score: r.score, weight: config.weights.schemaHint, weightedScore, evidence: { matched: r.matched } });
     }
 
-    // 6) fuzzy string similarity
+    // 7) fuzzy string similarity
     const fuzzy = (() => {
       const texts = truthyStrings([bucket.label, bucket.placeholder, bucket['aria-label'], bucket.title, bucket.name, bucket.id]);
       const r = fuzzyScore(key, texts);
@@ -359,8 +414,8 @@ export function rankCandidatesForKey(
 
     // Combine
     const totalWeighted = contr.reduce((s, c) => s + c.weightedScore, 0);
-    const maxWeight = Object.values(config.weights).reduce((s, w) => s + w, 0);
-    const totalScore = Math.max(0, Math.min(1, totalWeighted / Math.max(1e-6, maxWeight)));
+    const totalWeight = contr.reduce((s, c) => s + c.weight, 0);
+    const totalScore = Math.max(0, Math.min(1, totalWeighted / Math.max(1e-6, totalWeight)));
 
     const explanation: MatchExplanation = {
       totalScore,

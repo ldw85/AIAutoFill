@@ -3,7 +3,13 @@
   import { batch, candidatesView, keys, panelOpen, scan, readCandidateValue, applyAll, undoAll, applyCandidate, undoCandidate } from './state';
   import type { CandidateView } from './state';
   import type { BatchMatchResult, MatchResult } from '../../lib/fieldMatcher';
-  import { listTemplates, saveTemplate, saveMappingPreferences, loadMappingPreferences, extractValuesFromPage } from '../templates';
+  import { listTemplates, saveTemplate, extractValuesFromPage, normalizeLabel, type MappingPreferenceEntry } from '../templates';
+  import {
+    rememberPassphrase,
+    loadUserPreferences,
+    saveUserPreferenceSelections,
+    buildPreferenceInputsFromSelection
+  } from '../learning';
 
   let tab: 'preview' | 'templates' = 'preview';
   let passphrase = '';
@@ -26,13 +32,38 @@
     }
   }
 
-  function initFromPrefs(map: Map<string, string>) {
+  function normalizedCandidateLabels(cand: CandidateView['candidate']): string[] {
+    const attrs = cand.attributes || {};
+    const values = [
+      cand.accessibleName?.value,
+      attrs.placeholder,
+      attrs['aria-label'],
+      attrs.name,
+      attrs.id
+    ];
+    const out: string[] = [];
+    for (const value of values) {
+      if (value == null) continue;
+      const str = String(value).trim();
+      if (!str) continue;
+      const norm = normalizeLabel(str);
+      if (!norm) continue;
+      if (!out.includes(norm)) out.push(norm);
+    }
+    return out;
+  }
+
+  function initFromPrefs(map: Map<string, MappingPreferenceEntry>) {
     const cvs: CandidateView[] = $candidatesView;
     for (const cv of cvs) {
-      const label = (cv.candidate.accessibleName?.value || '').toString();
-      const norm = label.toLowerCase().normalize('NFD').replace(/\p{Diacritic}/gu, '').replace(/[_-]+/g, ' ').replace(/\s+/g, ' ').trim();
-      const pref = map.get(norm);
-      if (pref) selection[cv.candidate.id] = pref;
+      const normalized = normalizedCandidateLabels(cv.candidate);
+      for (const norm of normalized) {
+        const pref = map.get(norm);
+        if (pref) {
+          selection[cv.candidate.id] = pref.key;
+          break;
+        }
+      }
     }
   }
 
@@ -43,29 +74,37 @@
   }
 
   async function refreshTemplates() {
+    rememberPassphrase(passphrase, origin());
     if (!passphrase) { templateList = []; return; }
     templateList = await listTemplates(passphrase);
   }
 
   async function loadPrefs() {
-    if (!passphrase) { message = 'Enter passphrase to load preferences'; return; }
-    const m = await loadMappingPreferences(passphrase, origin());
+    if (!passphrase) {
+      rememberPassphrase('', origin());
+      message = 'Enter passphrase to load preferences';
+      return;
+    }
+    const map = await loadUserPreferences(passphrase, origin());
     resetSelection();
-    initFromPrefs(m);
+    initFromPrefs(map);
     message = 'Mapping preferences loaded for this site (if any)';
   }
 
   async function savePrefs() {
     if (!passphrase) { message = 'Enter passphrase to save preferences'; return; }
+    rememberPassphrase(passphrase, origin());
     const s = $scan;
     if (!s) { message = 'No scan available'; return; }
-    const items = s.candidates.map((c) => ({ label: (c.accessibleName?.value || '').toString(), key: selection[c.id] || '' })).filter((x) => !!x.key);
-    await saveMappingPreferences(passphrase, origin(), items);
+    const inputs = buildPreferenceInputsFromSelection(selection, s.candidates);
+    if (!inputs.length) { message = 'No mappings to save'; return; }
+    await saveUserPreferenceSelections(inputs);
     message = 'Mapping preferences saved';
   }
 
   async function extractAndSave() {
     if (!passphrase) { message = 'Enter passphrase to save templates'; return; }
+    rememberPassphrase(passphrase, origin());
     if (!templateName.trim()) { message = 'Enter a template name'; return; }
     const s = $scan; if (!s) { message = 'No scan available'; return; }
     saving = true; message = '';
