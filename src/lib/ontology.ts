@@ -46,9 +46,19 @@ export interface MatcherWeights {
   regexConstraint: number; // default 0.5
   schemaHint: number; // default 0.3
   fuzzy: number; // default 0.7
+  preference?: number; // default 1.1 when learning is available
   // Optional semantic matching weight; only used when semantic matching is enabled
   semantic?: number;
 }
+
+export interface PreferenceRecord {
+  key: string;
+  weight: number;
+  label?: string;
+  updatedAt?: number;
+}
+
+export type PreferenceMap = Record<string, PreferenceRecord[]>;
 
 export interface MatcherConfig {
   thresholds: MatcherThresholds;
@@ -57,6 +67,8 @@ export interface MatcherConfig {
   autocompleteMap?: Record<string, string>;
   // Map of ontology key -> set of synonyms, used by schemaHint heuristic
   synonyms?: Record<string, string[]>;
+  // Learned mapping preferences keyed by normalized label
+  preferences?: PreferenceMap;
 }
 
 export const DEFAULT_AUTOCOMPLETE_MAP: Record<string, string> = {
@@ -120,12 +132,14 @@ export const DEFAULT_WEIGHTS: MatcherWeights = {
   typeConstraint: 0.4,
   regexConstraint: 0.5,
   schemaHint: 0.3,
-  fuzzy: 0.7
+  fuzzy: 0.7,
+  preference: 1.1
 };
 
 export const DEFAULT_MATCHER_CONFIG: MatcherConfig = {
   thresholds: DEFAULT_THRESHOLDS,
   weights: DEFAULT_WEIGHTS,
   autocompleteMap: DEFAULT_AUTOCOMPLETE_MAP,
-  synonyms: DEFAULT_SYNONYMS
+  synonyms: DEFAULT_SYNONYMS,
+  preferences: {}
 };
