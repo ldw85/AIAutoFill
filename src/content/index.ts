@@ -6,8 +6,13 @@ import {
   refreshHighlights,
   recomputeBatch,
   applyAll,
+  undoAll,
   batch,
   readCandidateValue,
+  candidatesView,
+  getElementForCandidate,
+  scan as scanStore,
+  isApplied,
   type KeyConfig
 } from './ui/state';
 import { DEFAULT_KEYS, DEFAULT_VALUES, SYNONYMS_OVERLAY } from './ui/keys';
@@ -120,7 +125,9 @@ const scanner = startDomScanner({
       '[AIAutoFill] scanned candidates:',
       count,
       'at',
-      new Date(result.scannedAt).toISOString()
+      new Date(result.scannedAt).toISOString(),
+      'durationMs',
+      result.durationMs
     );
     const w = window as unknown as Record<string, unknown>;
     w.__AIAutoFill_lastScan__ = result;
@@ -209,3 +216,78 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
     return;
   }
 });
+
+interface TestMatchSummary {
+  candidateId: string;
+  tier: MatchResult['tier'];
+  score: number;
+  label: string | null;
+  path: string;
+}
+
+interface TestCandidateStatus {
+  id: string;
+  key: string | null;
+  status: string | null;
+  applied: boolean;
+  highlight: string | null;
+}
+
+function scanMetricsSnapshot(): { scannedAt: number; candidateCount: number; durationMs: number } | null {
+  const current = get(scanStore);
+  if (!current) return null;
+  return {
+    scannedAt: current.scannedAt,
+    candidateCount: current.candidates.length,
+    durationMs: current.durationMs
+  };
+}
+
+function topMatchSummaries(): Record<string, TestMatchSummary> {
+  const current: BatchMatchResult | null = get(batch);
+  if (!current) return {};
+  const summaries: Record<string, TestMatchSummary> = {};
+  for (const [key, matches] of Object.entries(current.byKey || {})) {
+    if (!Array.isArray(matches) || matches.length === 0) continue;
+    const best = matches[0];
+    if (!best) continue;
+    summaries[key] = {
+      candidateId: best.candidate.id,
+      tier: best.tier,
+      score: Number(best.score.toFixed(3)),
+      label: best.candidate.accessibleName?.value ?? null,
+      path: best.candidate.path
+    };
+  }
+  return summaries;
+}
+
+function candidateStatusSummaries(): TestCandidateStatus[] {
+  return get(candidatesView).map((view) => {
+    const el = getElementForCandidate(view.candidate);
+    const highlight = el
+      ? Array.from(el.classList).find((cls) => cls.startsWith('aiaf-highlight-')) ?? null
+      : null;
+    return {
+      id: view.candidate.id,
+      key: view.key?.key ?? null,
+      status: view.status ?? null,
+      applied: isApplied(view.candidate.id),
+      highlight
+    };
+  });
+}
+
+const testApi = Object.freeze({
+  applyAll: () => applyAll(),
+  undoAll: () => undoAll(),
+  rescan: () => {
+    scanner.rescanNow();
+    return true;
+  },
+  getScanMetrics: () => scanMetricsSnapshot(),
+  getTopMatches: () => topMatchSummaries(),
+  getCandidateStatuses: () => candidateStatusSummaries()
+});
+
+(window as unknown as Record<string, unknown>).__AIAutoFillTestAPI__ = testApi;
