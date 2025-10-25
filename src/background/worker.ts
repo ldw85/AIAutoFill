@@ -20,16 +20,15 @@ import {
 } from '../core/model/schemas';
 import {
   PBKDF2_ITERATIONS,
+  KEY_LENGTH,
   type CipherPayload,
   createVerification,
   decodeBytes,
   deriveKey,
-  encrypt,
-  decrypt,
+  encryptJson,
+  decryptJson,
   encodeBytes,
-  exportKey,
   generateSalt,
-  importKey,
   verifyKey
 } from '../core/storage/crypto';
 import {
@@ -37,12 +36,12 @@ import {
   readAllTemplates,
   readTemplate,
   writeTemplate,
+  writeTemplatesBatch,
   type TemplateRecord
 } from '../core/storage/db';
 import {
   MASTER_STORAGE_KEY,
   SECRETS_STORAGE_KEY,
-  SESSION_STORAGE_KEY,
   SETTINGS_STORAGE_KEY
 } from '../core/storage/keys';
 
@@ -56,11 +55,6 @@ interface MasterRecord {
 
 interface SecretsRecord {
   semanticApiKey?: CipherPayload;
-}
-
-interface SessionRecord {
-  key: string;
-  unlockedAt?: number;
 }
 
 interface TemplatePayloadV1 {
@@ -78,12 +72,8 @@ class WorkerError extends Error {
   }
 }
 
-const masterState: { key: CryptoKey | null; unlockedAt: number } = {
-  key: null,
-  unlockedAt: 0
-};
-
-let sessionInitialised = false;
+let unlockedKey: CryptoKey | null = null;
+const textEncoder = new TextEncoder();
 
 function handleRuntimeError(reject: (reason?: unknown) => void): boolean {
   const err = chrome.runtime.lastError;
@@ -121,32 +111,6 @@ function storageLocalRemove(key: string): Promise<void> {
   });
 }
 
-function storageSessionGet<T>(key: string): Promise<T | undefined> {
-  return new Promise((resolve, reject) => {
-    chrome.storage.session.get([key], (result) => {
-      if (handleRuntimeError(reject)) return;
-      resolve((result?.[key] as T | undefined) ?? undefined);
-    });
-  });
-}
-
-function storageSessionSet(key: string, value: unknown): Promise<void> {
-  return new Promise((resolve, reject) => {
-    chrome.storage.session.set({ [key]: value }, () => {
-      if (handleRuntimeError(reject)) return;
-      resolve();
-    });
-  });
-}
-
-function storageSessionRemove(key: string): Promise<void> {
-  return new Promise((resolve, reject) => {
-    chrome.storage.session.remove(key, () => {
-      if (handleRuntimeError(reject)) return;
-      resolve();
-    });
-  });
-}
 
 async function getMasterRecord(): Promise<MasterRecord | null> {
   const record = await storageLocalGet<MasterRecord>(MASTER_STORAGE_KEY);
@@ -181,60 +145,40 @@ async function setSecretsRecord(record: SecretsRecord | null): Promise<void> {
   await storageLocalSet(SECRETS_STORAGE_KEY, record);
 }
 
-async function persistSession(key: CryptoKey | null): Promise<void> {
-  if (!key) {
-    await storageSessionRemove(SESSION_STORAGE_KEY);
-    return;
+function setUnlockedKey(key: CryptoKey): void {
+  unlockedKey = key;
+}
+
+function clearUnlockedState(): void {
+  unlockedKey = null;
+}
+
+async function deriveKeyWithIterations(passphrase: string, salt: Uint8Array, iterations: number): Promise<CryptoKey> {
+  if (iterations === PBKDF2_ITERATIONS) {
+    return deriveKey(passphrase, salt);
   }
-  const exported = await exportKey(key);
-  await storageSessionSet(SESSION_STORAGE_KEY, {
-    key: exported,
-    unlockedAt: Date.now()
-  } satisfies SessionRecord);
-}
-
-async function restoreSession(): Promise<void> {
-  sessionInitialised = true;
-  const session = await storageSessionGet<SessionRecord>(SESSION_STORAGE_KEY);
-  if (!session?.key) return;
-  try {
-    const imported = await importKey(session.key);
-    const master = await getMasterRecord();
-    if (!master) {
-      await storageSessionRemove(SESSION_STORAGE_KEY);
-      return;
-    }
-    const valid = await verifyKey(imported, master.verification);
-    if (!valid) {
-      await storageSessionRemove(SESSION_STORAGE_KEY);
-      return;
-    }
-    masterState.key = imported;
-    masterState.unlockedAt = session.unlockedAt ?? Date.now();
-  } catch {
-    await storageSessionRemove(SESSION_STORAGE_KEY);
-  }
-}
-
-async function ensureSessionRestored(): Promise<void> {
-  if (masterState.key) return;
-  if (!sessionInitialised) {
-    await restoreSession();
-  }
-}
-
-async function setUnlockedKey(key: CryptoKey): Promise<void> {
-  masterState.key = key;
-  masterState.unlockedAt = Date.now();
-  await persistSession(key);
-  sessionInitialised = true;
-}
-
-async function clearUnlockedState(): Promise<void> {
-  masterState.key = null;
-  masterState.unlockedAt = 0;
-  await persistSession(null);
-  sessionInitialised = false;
+  const keyMaterial = await crypto.subtle.importKey(
+    'raw',
+    textEncoder.encode(passphrase),
+    'PBKDF2',
+    false,
+    ['deriveKey']
+  );
+  return crypto.subtle.deriveKey(
+    {
+      name: 'PBKDF2',
+      hash: 'SHA-256',
+      salt,
+      iterations
+    },
+    keyMaterial,
+    {
+      name: 'AES-GCM',
+      length: KEY_LENGTH
+    },
+    false,
+    ['encrypt', 'decrypt']
+  );
 }
 
 async function getStoredSettings(): Promise<RuntimeSettings> {
@@ -279,7 +223,7 @@ async function isApiKeyConfigured(): Promise<boolean> {
 async function saveSemanticApiKey(value: string | null, key: CryptoKey): Promise<void> {
   const secrets = (await getSecretsRecord()) ?? {};
   if (value && value.trim()) {
-    secrets.semanticApiKey = await encrypt(value.trim(), key);
+    secrets.semanticApiKey = await encryptJson(value.trim(), key);
   } else {
     delete secrets.semanticApiKey;
   }
@@ -289,7 +233,7 @@ async function saveSemanticApiKey(value: string | null, key: CryptoKey): Promise
 async function readSemanticApiKey(key: CryptoKey): Promise<string | null> {
   const secrets = await getSecretsRecord();
   if (!secrets?.semanticApiKey) return null;
-  const decrypted = await decrypt<string>(secrets.semanticApiKey, key);
+  const decrypted = await decryptJson<string>(secrets.semanticApiKey, key);
   return decrypted ?? null;
 }
 
@@ -298,7 +242,7 @@ async function listTemplatesForKey(key: CryptoKey): Promise<TemplateModel[]> {
   const templates: TemplateModel[] = [];
   for (const record of records) {
     try {
-      const payload = await decrypt<TemplatePayloadV1>(record.payload, key);
+      const payload = await decryptJson<TemplatePayloadV1>(record.payload, key);
       templates.push({
         id: record.id,
         label: record.label,
@@ -318,7 +262,7 @@ async function saveTemplateWithKey(payload: TemplateSavePayload, key: CryptoKey)
   const id = normalised.id?.trim() || generateTemplateId();
   const existing = await readTemplate(id);
   const now = Date.now();
-  const encrypted = await encrypt<TemplatePayloadV1>({ values: normalised.values }, key);
+  const encrypted = await encryptJson<TemplatePayloadV1>({ values: normalised.values }, key);
   const record: TemplateRecord = {
     id,
     label: normalised.label,
@@ -352,7 +296,7 @@ async function unlockWithPassphrase(passphrase: string): Promise<UnlockResult> {
   if (!existing) {
     ensurePassphraseStrength(trimmed);
     const salt = generateSalt();
-    const key = await deriveKey(trimmed, salt, PBKDF2_ITERATIONS);
+    const key = await deriveKey(trimmed, salt);
     const verification = await createVerification(key);
     const record: MasterRecord = {
       salt: encodeBytes(salt),
@@ -362,17 +306,18 @@ async function unlockWithPassphrase(passphrase: string): Promise<UnlockResult> {
       updatedAt: Date.now()
     };
     await setMasterRecord(record);
-    await setUnlockedKey(key);
+    setUnlockedKey(key);
     return { status: 'created' } satisfies UnlockResult;
   }
 
   const salt = decodeBytes(existing.salt);
-  const key = await deriveKey(trimmed, salt, existing.iterations ?? PBKDF2_ITERATIONS);
+  const iterations = existing.iterations ?? PBKDF2_ITERATIONS;
+  const key = await deriveKeyWithIterations(trimmed, salt, iterations);
   const valid = await verifyKey(key, existing.verification);
   if (!valid) {
     throw new WorkerError('INVALID_PASSPHRASE', 'Incorrect passphrase.');
   }
-  await setUnlockedKey(key);
+  setUnlockedKey(key);
   return { status: 'unlocked' } satisfies UnlockResult;
 }
 
@@ -386,7 +331,8 @@ async function changePassphrase(payload: PassphraseChangePayload): Promise<void>
     throw new WorkerError('PASSPHRASE_NOT_SET', 'Set a passphrase before attempting to change it.');
   }
   const salt = decodeBytes(master.salt);
-  const oldKey = await deriveKey(current, salt, master.iterations ?? PBKDF2_ITERATIONS);
+  const iterations = master.iterations ?? PBKDF2_ITERATIONS;
+  const oldKey = await deriveKeyWithIterations(current, salt, iterations);
   const valid = await verifyKey(oldKey, master.verification);
   if (!valid) {
     throw new WorkerError('INVALID_PASSPHRASE', 'Incorrect current passphrase.');
@@ -395,21 +341,26 @@ async function changePassphrase(payload: PassphraseChangePayload): Promise<void>
   const templates = await readAllTemplates();
   const decryptedTemplates: Array<{ record: TemplateRecord; values: TemplateValues }> = [];
   for (const record of templates) {
-    const payload = await decrypt<TemplatePayloadV1>(record.payload, oldKey);
+    const payload = await decryptJson<TemplatePayloadV1>(record.payload, oldKey);
     decryptedTemplates.push({ record, values: payload?.values ?? {} });
   }
   const existingApiKey = await readSemanticApiKey(oldKey);
 
   const newSalt = generateSalt();
-  const newKey = await deriveKey(next, newSalt, PBKDF2_ITERATIONS);
+  const newKey = await deriveKey(next, newSalt);
   const newVerification = await createVerification(newKey);
 
+  const reencryptedRecords: TemplateRecord[] = [];
   for (const item of decryptedTemplates) {
-    const encrypted = await encrypt<TemplatePayloadV1>({ values: item.values }, newKey);
-    await writeTemplate({
+    const encrypted = await encryptJson<TemplatePayloadV1>({ values: item.values }, newKey);
+    reencryptedRecords.push({
       ...item.record,
       payload: encrypted
     });
+  }
+
+  if (reencryptedRecords.length > 0) {
+    await writeTemplatesBatch(reencryptedRecords);
   }
 
   await saveSemanticApiKey(existingApiKey, newKey);
@@ -422,19 +373,17 @@ async function changePassphrase(payload: PassphraseChangePayload): Promise<void>
     updatedAt: Date.now()
   };
   await setMasterRecord(updatedRecord);
-  await setUnlockedKey(newKey);
+  setUnlockedKey(newKey);
 }
 
 async function requireUnlockedKey(): Promise<CryptoKey> {
-  await ensureSessionRestored();
-  if (!masterState.key) {
+  if (!unlockedKey) {
     throw new WorkerError('LOCKED', 'Unlock the session to continue.');
   }
-  return masterState.key;
+  return unlockedKey;
 }
 
 async function handleSettingsGet(origin?: string): Promise<RuntimeResponse<SettingsSnapshot>> {
-  await ensureSessionRestored();
   const settings = await getStoredSettings();
   const master = await getMasterRecord();
   const snapshot = {
@@ -442,7 +391,7 @@ async function handleSettingsGet(origin?: string): Promise<RuntimeResponse<Setti
     overrides: settings.overrides,
     semanticEndpoint: settings.semanticEndpoint,
     hasPassphrase: Boolean(master),
-    unlocked: Boolean(masterState.key),
+    unlocked: Boolean(unlockedKey),
     apiKeyConfigured: await isApiKeyConfigured(),
     effectiveMode: origin ? effectiveMode(settings, origin.toLowerCase()) : undefined
   } satisfies SettingsSnapshot;
@@ -496,7 +445,7 @@ async function handleUnlock(passphrase: string): Promise<RuntimeResponse<UnlockR
 }
 
 async function handleLock(): Promise<RuntimeResponse<null>> {
-  await clearUnlockedState();
+  clearUnlockedState();
   notifyTemplatesUpdated();
   return { success: true, data: null } satisfies RuntimeResponse<null>;
 }
@@ -546,8 +495,6 @@ chrome.runtime.onInstalled.addListener(() => {
     }
   })();
 });
-
-void restoreSession();
 
 chrome.runtime.onMessage.addListener((rawMessage: unknown, _sender, sendResponse) => {
   const messageType = (rawMessage as { type?: string } | undefined)?.type;

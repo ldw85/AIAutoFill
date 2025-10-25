@@ -57,6 +57,27 @@ export async function writeTemplate(record: TemplateRecord): Promise<void> {
   await db.put(STORE_TEMPLATES, record);
 }
 
+export async function writeTemplatesBatch(records: TemplateRecord[]): Promise<void> {
+  if (records.length === 0) {
+    return;
+  }
+  const db = await getDb();
+  const tx = db.transaction(STORE_TEMPLATES, 'readwrite');
+  try {
+    for (const record of records) {
+      await tx.store.put(record);
+    }
+    await tx.done;
+  } catch (error) {
+    try {
+      tx.abort();
+    } catch {
+      // ignore abort errors
+    }
+    throw error;
+  }
+}
+
 export async function deleteTemplate(id: string): Promise<void> {
   const db = await getDb();
   await db.delete(STORE_TEMPLATES, id);
