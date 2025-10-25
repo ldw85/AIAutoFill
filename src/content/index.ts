@@ -17,17 +17,20 @@ import {
 } from './ui/state';
 import { DEFAULT_KEYS, DEFAULT_VALUES, SYNONYMS_OVERLAY } from './ui/keys';
 import type { SemanticConfig } from '../lib/semantic';
+import { sendRuntimeMessage, type SettingsSnapshot, type TemplateListResult } from '../core/messages';
+import { SETTINGS_STORAGE_KEY } from '../core/storage/keys';
 import {
-  loadSettings,
-  normalizeSettings,
-  findTemplate,
-  SETTINGS_STORAGE_KEY,
-  type ExtensionSettings
-} from '../lib/settings';
+  normaliseRuntimeSettings,
+  effectiveMode,
+  type RuntimeSettings,
+  type TemplateModel
+} from '../core/model/schemas';
 import type { BatchMatchResult, MatchResult } from '../lib/fieldMatcher';
 import { get } from 'svelte/store';
 
 console.info('AIAutoFill content script loaded');
+
+const currentOrigin = window.location.origin;
 
 // Mount overlay UI
 const host = document.createElement('div');
@@ -47,6 +50,108 @@ const semanticWeight = Number(import.meta.env.VITE_SEMANTIC_WEIGHT || 0.6);
 const embeddingsApiKey = (import.meta.env.VITE_EMBEDDINGS_API_KEY as string) || undefined;
 
 let semanticCfg: SemanticConfig | undefined;
+
+interface ExtensionSettings {
+  templates: TemplateModel[];
+  quickFillTemplateId: string | null;
+  quickExtractTemplateId: string | null;
+  offlineMode: boolean;
+  semanticMatching: boolean;
+}
+
+let cachedRuntime: RuntimeSettings | null = null;
+let cachedTemplates: TemplateModel[] = [];
+
+function findTemplate(settings: ExtensionSettings, id?: string | null): TemplateModel | undefined {
+  if (!id) return undefined;
+  return settings.templates.find((template) => template.id === id);
+}
+
+function extensionSettingsFrom(runtime: RuntimeSettings, templates: TemplateModel[]): ExtensionSettings {
+  const mode = effectiveMode(runtime, currentOrigin);
+  const offlineMode = mode !== 'semantic';
+  const fallbackTemplate = templates[0]?.id ?? null;
+  return {
+    templates,
+    quickFillTemplateId: fallbackTemplate,
+    quickExtractTemplateId: fallbackTemplate,
+    offlineMode,
+    semanticMatching: !offlineMode
+  };
+}
+
+function storageLocalGet<T>(key: string): Promise<T | undefined> {
+  return new Promise((resolve) => {
+    chrome.storage.local.get([key], (result) => {
+      const err = chrome.runtime.lastError;
+      if (err) {
+        resolve(undefined);
+        return;
+      }
+      resolve(result?.[key] as T | undefined);
+    });
+  });
+}
+
+async function fetchTemplatesFromBackground(): Promise<TemplateModel[]> {
+  try {
+    const response = await sendRuntimeMessage<TemplateListResult>({ type: 'TEMPLATE_LIST' });
+    if (response.success && response.data) {
+      return response.data.templates ?? [];
+    }
+  } catch (error) {
+    // eslint-disable-next-line no-console
+    console.warn('[AIAutoFill] failed to fetch templates', error);
+  }
+  return [];
+}
+
+async function loadSettings(): Promise<ExtensionSettings> {
+  let runtime: RuntimeSettings | null = null;
+  let templates: TemplateModel[] = [];
+  try {
+    const snapshotResponse = await sendRuntimeMessage<SettingsSnapshot>({
+      type: 'SETTINGS_GET',
+      origin: currentOrigin
+    });
+    if (snapshotResponse.success && snapshotResponse.data) {
+      const snap = snapshotResponse.data;
+      runtime = normaliseRuntimeSettings({
+        mode: snap.mode,
+        overrides: snap.overrides,
+        semanticEndpoint: snap.semanticEndpoint
+      });
+      if (snap.unlocked) {
+        templates = await fetchTemplatesFromBackground();
+      }
+    } else if (snapshotResponse.error) {
+      console.warn('[AIAutoFill] settings snapshot error', snapshotResponse.error);
+    }
+  } catch (error) {
+    console.warn('[AIAutoFill] failed to query settings snapshot', error);
+  }
+
+  if (!runtime) {
+    const stored = await storageLocalGet<RuntimeSettings>(SETTINGS_STORAGE_KEY);
+    runtime = normaliseRuntimeSettings(stored);
+  }
+
+  if (!templates.length && cachedTemplates.length) {
+    templates = cachedTemplates;
+  }
+
+  cachedRuntime = runtime;
+  cachedTemplates = templates;
+  return extensionSettingsFrom(runtime, templates);
+}
+
+async function refreshTemplates(): Promise<void> {
+  if (!cachedRuntime) return;
+  const templates = await fetchTemplatesFromBackground();
+  cachedTemplates = templates;
+  const settings = extensionSettingsFrom(cachedRuntime, cachedTemplates);
+  applySettings(settings);
+}
 
 function computeSemanticConfig(settings: ExtensionSettings): SemanticConfig | undefined {
   if (!envSemanticEnabled) return undefined;
@@ -106,9 +211,12 @@ void initialiseSettings();
 chrome.storage.onChanged.addListener((changes, areaName) => {
   if (areaName !== 'local') return;
   if (!Object.prototype.hasOwnProperty.call(changes, SETTINGS_STORAGE_KEY)) return;
-  const nextRaw = changes[SETTINGS_STORAGE_KEY]?.newValue as Partial<ExtensionSettings> | null | undefined;
-  const next = normalizeSettings(nextRaw || undefined);
-  applySettings(next);
+  const nextRaw = changes[SETTINGS_STORAGE_KEY]?.newValue as unknown;
+  const runtime = normaliseRuntimeSettings(nextRaw);
+  cachedRuntime = runtime;
+  const settings = extensionSettingsFrom(runtime, cachedTemplates);
+  applySettings(settings);
+  void refreshTemplates();
 });
 
 // Initialize keys with default values immediately for UI responsiveness
@@ -179,6 +287,11 @@ function extractCurrentValues(): Record<string, unknown> {
 
 // Respond to extension messages
 chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
+  if (msg?.type === 'AIAF_TEMPLATES_UPDATED') {
+    void refreshTemplates();
+    return;
+  }
+
   if (msg?.type === 'GET_PAGE_INFO') {
     const title = document.title;
     const w = window as unknown as { __AIAutoFill_lastScan__?: { candidates?: Candidate[] } };
