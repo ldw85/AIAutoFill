@@ -52,6 +52,10 @@ export interface TemplateDeleteResult {
   templates: TemplateModel[];
 }
 
+export interface RehydrateResult {
+  unlocked: boolean;
+}
+
 export interface PassphraseChangePayload {
   current: string;
   next: string;
@@ -62,6 +66,7 @@ export type RuntimeMessage =
   | { type: 'SETTINGS_SET'; payload: SettingsUpdatePayload }
   | { type: 'UNLOCK'; passphrase: string }
   | { type: 'LOCK' }
+  | { type: 'ATTEMPT_REHYDRATE' }
   | { type: 'TEMPLATE_LIST' }
   | { type: 'TEMPLATE_SAVE'; payload: TemplateSavePayload }
   | { type: 'TEMPLATE_DELETE'; id: string }
