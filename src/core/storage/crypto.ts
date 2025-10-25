@@ -6,9 +6,10 @@ export interface CipherPayload {
   data: string;
 }
 
-export const PBKDF2_ITERATIONS = 210_000;
+export const PBKDF2_ITERATIONS = 310_000;
 export const KEY_LENGTH = 256;
 export const SALT_LENGTH = 32;
+const IV_LENGTH = 12;
 const VERIFICATION_TEXT = 'AIAutoFill::MASTER::VERIFICATION::v1';
 
 function toBase64(bytes: Uint8Array): string {
@@ -42,11 +43,7 @@ export function generateSalt(length: number = SALT_LENGTH): Uint8Array {
   return salt;
 }
 
-export async function deriveKey(
-  passphrase: string,
-  salt: Uint8Array,
-  iterations: number = PBKDF2_ITERATIONS
-): Promise<CryptoKey> {
+export async function deriveKey(passphrase: string, salt: Uint8Array): Promise<CryptoKey> {
   const passphraseBytes = encoder.encode(passphrase);
   const keyMaterial = await crypto.subtle.importKey('raw', passphraseBytes, 'PBKDF2', false, ['deriveKey']);
   return crypto.subtle.deriveKey(
@@ -54,7 +51,7 @@ export async function deriveKey(
       name: 'PBKDF2',
       hash: 'SHA-256',
       salt,
-      iterations
+      iterations: PBKDF2_ITERATIONS
     },
     keyMaterial,
     {
@@ -66,18 +63,8 @@ export async function deriveKey(
   );
 }
 
-export async function exportKey(key: CryptoKey): Promise<string> {
-  const raw = await crypto.subtle.exportKey('raw', key);
-  return toBase64(new Uint8Array(raw));
-}
-
-export async function importKey(serialised: string): Promise<CryptoKey> {
-  const raw = decodeBytes(serialised);
-  return crypto.subtle.importKey('raw', raw, 'AES-GCM', false, ['encrypt', 'decrypt']);
-}
-
-export async function encrypt<T>(payload: T, key: CryptoKey): Promise<CipherPayload> {
-  const iv = new Uint8Array(12);
+export async function encryptJson<T>(payload: T, key: CryptoKey): Promise<CipherPayload> {
+  const iv = new Uint8Array(IV_LENGTH);
   crypto.getRandomValues(iv);
   const data = encoder.encode(JSON.stringify(payload));
   const cipherBuffer = await crypto.subtle.encrypt(
@@ -94,7 +81,7 @@ export async function encrypt<T>(payload: T, key: CryptoKey): Promise<CipherPayl
   };
 }
 
-export async function decrypt<T>(cipher: CipherPayload, key: CryptoKey): Promise<T> {
+export async function decryptJson<T>(cipher: CipherPayload, key: CryptoKey): Promise<T> {
   const iv = decodeBytes(cipher.iv);
   const data = decodeBytes(cipher.data);
   const plainBuffer = await crypto.subtle.decrypt(
@@ -110,12 +97,12 @@ export async function decrypt<T>(cipher: CipherPayload, key: CryptoKey): Promise
 }
 
 export async function createVerification(key: CryptoKey): Promise<CipherPayload> {
-  return encrypt(VERIFICATION_TEXT, key);
+  return encryptJson(VERIFICATION_TEXT, key);
 }
 
 export async function verifyKey(key: CryptoKey, verification: CipherPayload): Promise<boolean> {
   try {
-    const decoded = await decrypt<string>(verification, key);
+    const decoded = await decryptJson<string>(verification, key);
     return decoded === VERIFICATION_TEXT;
   } catch {
     return false;
