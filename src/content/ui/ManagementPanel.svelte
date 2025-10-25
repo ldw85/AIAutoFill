@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onMount } from 'svelte';
+  import { onMount, onDestroy } from 'svelte';
   import { batch, candidatesView, keys, panelOpen, scan, readCandidateValue, applyAll, undoAll, applyCandidate, undoCandidate } from './state';
   import type { CandidateView } from './state';
   import type { BatchMatchResult, MatchResult } from '../../lib/fieldMatcher';
@@ -20,6 +20,24 @@
 
   // mapping selection per candidate id -> ontology key
   let selection: Record<string, string> = {};
+
+  const VIRTUALIZATION_THRESHOLD = 100;
+  const VIRTUAL_ROW_HEIGHT = 48;
+  const VIRTUAL_OVERSCAN = 6;
+
+  let selectedGroup = 'all';
+  let lastSelectedGroup = 'all';
+  let candidateListEl: HTMLElement | null = null;
+  let formGroupOptions: Array<{ id: string; label: string; count: number }> = [];
+  let filteredCandidates: CandidateView[] = [];
+  let visibleCandidates: CandidateView[] = [];
+  let virtualizationEnabled = false;
+  let totalCandidates = 0;
+  let topSpacer = 0;
+  let bottomSpacer = 0;
+  let virtualStart = 0;
+  let virtualEnd = 0;
+  let resizeObserver: ResizeObserver | null = null;
 
   function origin(): string { return location.origin; }
 
@@ -121,8 +139,123 @@
     }
   }
 
+  function triggerRescan() {
+    try {
+      (window as unknown as { __AIAutoFillOverlay__?: { rescan: () => void } }).__AIAutoFillOverlay__?.rescan();
+    } catch (error) {
+      console.warn('[AIAutoFill] failed to trigger rescan', error);
+    }
+  }
+
+  function recomputeVirtualWindow() {
+    if (!virtualizationEnabled) {
+      virtualStart = 0;
+      virtualEnd = totalCandidates;
+      topSpacer = 0;
+      bottomSpacer = 0;
+      visibleCandidates = filteredCandidates;
+      return;
+    }
+    const container = candidateListEl;
+    if (!container) {
+      virtualStart = 0;
+      virtualEnd = Math.min(totalCandidates, VIRTUALIZATION_THRESHOLD);
+      topSpacer = 0;
+      bottomSpacer = Math.max(0, (totalCandidates - virtualEnd) * VIRTUAL_ROW_HEIGHT);
+      visibleCandidates = filteredCandidates.slice(virtualStart, virtualEnd);
+      return;
+    }
+    const scrollTop = container.scrollTop;
+    const height = container.clientHeight || 0;
+    const itemHeight = VIRTUAL_ROW_HEIGHT;
+    const overscan = VIRTUAL_OVERSCAN;
+    const visibleCount = Math.max(1, Math.ceil(height / itemHeight) + overscan * 2);
+    const start = Math.max(0, Math.floor(scrollTop / itemHeight) - overscan);
+    const end = Math.min(totalCandidates, start + visibleCount);
+    virtualStart = start;
+    virtualEnd = end;
+    topSpacer = start * itemHeight;
+    bottomSpacer = Math.max(0, (totalCandidates - end) * itemHeight);
+    visibleCandidates = filteredCandidates.slice(start, end);
+  }
+
+  function handleListScroll() {
+    if (!virtualizationEnabled) return;
+    recomputeVirtualWindow();
+  }
+
+  $: formGroupOptions = (() => {
+    const map = new Map<string, { label: string; count: number }>();
+    const currentScan = $scan;
+    if (currentScan) {
+      for (const cand of currentScan.candidates) {
+        const id = cand.formGroupId || 'document:root';
+        const label = (cand.formGroupLabel || 'Ungrouped Fields').trim() || 'Ungrouped Fields';
+        const entry = map.get(id);
+        if (entry) entry.count += 1;
+        else map.set(id, { label, count: 1 });
+      }
+    }
+    return Array.from(map.entries())
+      .map(([id, entry]) => ({ id, label: entry.label, count: entry.count }))
+      .sort((a, b) => a.label.localeCompare(b.label));
+  })();
+
+  $: if (selectedGroup !== 'all' && !formGroupOptions.some((opt) => opt.id === selectedGroup)) {
+    selectedGroup = 'all';
+  }
+
+  $: if (selectedGroup !== lastSelectedGroup) {
+    if (candidateListEl) {
+      candidateListEl.scrollTop = 0;
+    }
+    lastSelectedGroup = selectedGroup;
+  }
+
+  $: filteredCandidates = $candidatesView.filter((cv) => selectedGroup === 'all' || cv.candidate.formGroupId === selectedGroup);
+
+  $: totalCandidates = filteredCandidates.length;
+
+  $: virtualizationEnabled = totalCandidates > VIRTUALIZATION_THRESHOLD;
+
+  $: recomputeVirtualWindow();
+
+  $: {
+    if (candidateListEl) {
+      if (!resizeObserver && typeof ResizeObserver !== 'undefined') {
+        resizeObserver = new ResizeObserver(() => recomputeVirtualWindow());
+        resizeObserver.observe(candidateListEl);
+      }
+    } else if (resizeObserver) {
+      resizeObserver.disconnect();
+      resizeObserver = null;
+    }
+  }
+
+  $: if ($scan) {
+    const validIds = new Set($scan.candidates.map((cand) => cand.id));
+    const staleIds = Object.keys(selection).filter((id) => !validIds.has(id));
+    if (staleIds.length) {
+      const next = { ...selection };
+      for (const id of staleIds) delete next[id];
+      selection = next;
+    }
+  }
+
+  $: if (tab === 'templates') {
+    recomputeVirtualWindow();
+  }
+
   onMount(() => {
     resetSelection();
+    recomputeVirtualWindow();
+  });
+
+  onDestroy(() => {
+    if (resizeObserver) {
+      resizeObserver.disconnect();
+      resizeObserver = null;
+    }
   });
 </script>
 
@@ -133,7 +266,10 @@
       <button class:active={tab==='preview'} on:click={() => tab='preview'}>Preview</button>
       <button class:active={tab==='templates'} on:click={() => tab='templates'}>Templates</button>
     </div>
-    <button on:click={() => panelOpen.set(false)}>×</button>
+    <div class="header-actions">
+      <button class="rescan-btn" type="button" on:click={triggerRescan} aria-label="Rescan fields">Rescan</button>
+      <button class="close-btn" type="button" on:click={() => panelOpen.set(false)} aria-label="Close panel">×</button>
+    </div>
   </header>
 
   {#if tab === 'preview'}
@@ -175,22 +311,75 @@
 
       <div class="section">
         <div class="subheader">Mapping (field → ontology key)</div>
-        {#each $candidatesView as cv}
-          {#key cv.candidate.id}
-            <div class="map-row">
-              <div class="field-label">{cv.candidate.accessibleName?.value || cv.candidate.attributes?.placeholder || cv.candidate.attributes?.name || cv.candidate.tagName}</div>
-              <div class="arrow">→</div>
-              <div>
-                <select bind:value={selection[cv.candidate.id]}>
-                  <option value="">(ignore)</option>
-                  {#each $keys as kc}
-                    <option value={kc.key.key}>{kc.key.label || kc.key.key}</option>
-                  {/each}
-                </select>
+        <div class="candidate-controls">
+          <div class="summary">
+            {#if $scan}
+              Scan v{$scan.version} · {totalCandidates} field{totalCandidates === 1 ? '' : 's'}
+              {#if virtualizationEnabled}
+                · showing {visibleCandidates.length} at a time
+              {/if}
+            {:else}
+              No scan yet
+            {/if}
+          </div>
+          <div class="control-group">
+            <label for="aiaf-group-filter">Group</label>
+            <select id="aiaf-group-filter" bind:value={selectedGroup}>
+              <option value="all">All groups</option>
+              {#each formGroupOptions as group}
+                <option value={group.id}>{group.label} ({group.count})</option>
+              {/each}
+            </select>
+          </div>
+        </div>
+        <div
+          class="candidate-list"
+          bind:this={candidateListEl}
+          on:scroll={handleListScroll}
+        >
+          {#if totalCandidates === 0}
+            <div class="empty-state">No fields detected for this view.</div>
+          {:else}
+            <div style="height: {topSpacer}px;" aria-hidden="true"></div>
+            {#each visibleCandidates as cv (cv.candidate.id)}
+              <div class="map-row">
+                <div class="field-info">
+                  <div class="field-label">
+                    {cv.candidate.accessibleName?.value
+                      || cv.candidate.attributes?.placeholder
+                      || cv.candidate.attributes?.name
+                      || cv.candidate.tagName}
+                  </div>
+                  <div class="field-meta">
+                    <span class="status {cv.status || 'unmatched'}">
+                      {cv.status === 'pending'
+                        ? 'matched'
+                        : cv.status === 'uncertain'
+                          ? 'uncertain'
+                          : 'unmatched'}
+                    </span>
+                    {#if cv.candidate.formGroupLabel}
+                      <span class="group-label">{cv.candidate.formGroupLabel}</span>
+                    {/if}
+                  </div>
+                </div>
+                <div class="arrow">→</div>
+                <div>
+                  <select bind:value={selection[cv.candidate.id]}>
+                    <option value="">(ignore)</option>
+                    {#each $keys as kc}
+                      <option value={kc.key.key}>{kc.key.label || kc.key.key}</option>
+                    {/each}
+                  </select>
+                </div>
               </div>
+            {/each}
+            <div style="height: {bottomSpacer}px;" aria-hidden="true"></div>
+            <div class="end-sentinel">
+              End of list · {totalCandidates} field{totalCandidates === 1 ? '' : 's'}
             </div>
-          {/key}
-        {/each}
+          {/if}
+        </div>
         <div class="row right">
           <button on:click={resetSelection}>Reset</button>
         </div>
@@ -226,9 +415,15 @@
 </div>
 
 <style>
+  header { display: flex; align-items: center; gap: 8px; }
   .tabs { display: flex; gap: 6px; margin-left: auto; margin-right: 6px; }
   .tabs button { background: #f3f4f6; border: 1px solid #e5e7eb; border-radius: 6px; padding: 3px 8px; cursor: pointer; font-size: 12px; }
   .tabs button.active { background: #2d6cdf; color: #fff; border-color: #2d6cdf; }
+  .header-actions { display: flex; gap: 6px; align-items: center; }
+  .rescan-btn { background: #f9fafb; border: 1px solid #d1d5db; border-radius: 6px; padding: 3px 8px; font-size: 12px; cursor: pointer; color: #1f2937; }
+  .rescan-btn:hover { background: #eef2ff; border-color: #c7d2fe; }
+  .close-btn { background: transparent; border: none; font-size: 16px; line-height: 1; cursor: pointer; color: #6b7280; padding: 2px 6px; }
+  .close-btn:hover { color: #111827; }
   .section { padding: 6px 0; border-top: 1px solid #f5f5f5; }
   .section:first-child { border-top: none; }
   .subheader { font-weight: 600; font-size: 12px; color: #111827; margin-bottom: 6px; }
@@ -237,13 +432,29 @@
   .row label { font-size: 12px; color: #374151; }
   .row input { width: 100%; padding: 4px 6px; border: 1px solid #e5e7eb; border-radius: 6px; font-size: 12px; }
   .row .actions { display: flex; gap: 6px; }
-  .map-row { display: grid; grid-template-columns: 1fr auto 1fr; align-items: center; gap: 8px; padding: 4px 0; border-bottom: 1px dashed #f0f0f0; }
-  .map-row:last-child { border-bottom: none; }
+  .candidate-controls { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 8px; }
+  .candidate-controls .summary { font-size: 12px; color: #374151; }
+  .candidate-controls .control-group { display: flex; align-items: center; gap: 6px; font-size: 12px; color: #374151; }
+  .candidate-controls .control-group select { width: auto; min-width: 160px; }
+  .candidate-list { max-height: 320px; overflow-y: auto; border: 1px solid #e5e7eb; border-radius: 8px; padding: 4px 0; background: #fff; }
+  .candidate-list select { width: 100%; }
+  .map-row { display: grid; grid-template-columns: minmax(0, 1fr) auto minmax(140px, 200px); align-items: center; gap: 12px; }
+  .candidate-list .map-row { padding: 6px 12px; }
+  .candidate-list .map-row + .map-row { border-top: 1px dashed #f0f0f0; }
+  .field-info { display: flex; flex-direction: column; gap: 4px; }
   .field-label { font-size: 12px; color: #374151; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .field-meta { display: flex; align-items: center; gap: 6px; font-size: 11px; color: #6b7280; }
+  .status { text-transform: uppercase; font-weight: 600; letter-spacing: 0.04em; padding: 1px 6px; border-radius: 999px; border: 1px solid transparent; }
+  .status.pending { background: #ecfdf5; color: #047857; border-color: #bbf7d0; }
+  .status.uncertain { background: #fef3c7; color: #92400e; border-color: #fcd34d; }
+  .status.unmatched { background: #f3f4f6; color: #4b5563; border-color: #e5e7eb; }
+  .group-label { max-width: 180px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .arrow { color: #6b7280; font-size: 12px; }
   select { width: 100%; padding: 3px 6px; border: 1px solid #e5e7eb; border-radius: 6px; font-size: 12px; background: #fff; }
   .message { font-size: 12px; color: #14532d; background: #f0fdf4; border: 1px solid #bbf7d0; border-radius: 6px; padding: 6px; margin-top: 6px; }
   .muted { font-size: 12px; color: #6b7280; }
+  .end-sentinel { padding: 8px 0; text-align: center; font-size: 11px; color: #6b7280; }
+  .empty-state { padding: 16px; text-align: center; font-size: 12px; color: #6b7280; }
   .tmpl-row { display: grid; grid-template-columns: 1fr auto; gap: 8px; padding: 4px 0; border-bottom: 1px dashed #f0f0f0; }
   .tmpl-row:last-child { border-bottom: none; }
   .tmpl-name { font-weight: 500; font-size: 12px; }

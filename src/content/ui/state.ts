@@ -144,7 +144,12 @@ export function setKeys(list: KeyConfig[], cfg?: Partial<MatcherConfig> & { sema
 }
 
 export function updateScan(result: ScanResult, cfg?: Partial<MatcherConfig> & { semantic?: SemanticConfig }) {
+  const current = get(scan);
+  if (current && result.version <= current.version) {
+    return;
+  }
   scan.set(result);
+  pruneAppliedForCurrentScan(result);
   void recomputeBatch(cfg);
 }
 
@@ -191,9 +196,46 @@ interface AppliedInfo {
   id: string;
   original: unknown;
   appliedValue: unknown;
+  path: string;
+  framePath: string[];
 }
 
 const applied = new Map<string, AppliedInfo>();
+
+function resolveElementFromApplied(info: AppliedInfo): HTMLElement | null {
+  try {
+    let root: Document | ShadowRoot | null = document;
+    if (info.framePath && info.framePath.length) {
+      for (const sel of info.framePath) {
+        const iframe = root.querySelector(sel) as HTMLIFrameElement | null;
+        if (!iframe || !iframe.contentDocument) return null;
+        root = iframe.contentDocument;
+      }
+    }
+    const el = root.querySelector(info.path);
+    return el instanceof HTMLElement ? el : null;
+  } catch {
+    return null;
+  }
+}
+
+function pruneAppliedForCurrentScan(result: ScanResult | null) {
+  if (!result) {
+    for (const info of applied.values()) {
+      const el = resolveElementFromApplied(info);
+      if (el) setHighlight(el, undefined);
+    }
+    applied.clear();
+    return;
+  }
+  const validIds = new Set(result.candidates.map((cand) => cand.id));
+  for (const [id, info] of Array.from(applied.entries())) {
+    if (validIds.has(id)) continue;
+    const el = resolveElementFromApplied(info);
+    if (el) setHighlight(el, undefined);
+    applied.delete(id);
+  }
+}
 
 export function getElementForCandidate(cand: Candidate): HTMLElement | null {
   try {
@@ -245,7 +287,13 @@ export function applyCandidate(cand: Candidate, match: MatchResult, value: unkno
   const orig = getOriginalValue(el);
   const res = fillElement(el, value);
   if (res.changed) {
-    applied.set(cand.id, { id: cand.id, original: orig, appliedValue: value });
+    applied.set(cand.id, {
+      id: cand.id,
+      original: orig,
+      appliedValue: value,
+      path: cand.path,
+      framePath: cand.framePath
+    });
     setHighlight(el, 'filled');
     void import('../learning')
       .then(({ recordAppliedMatch }) => {
