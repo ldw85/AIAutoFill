@@ -1,4 +1,4 @@
-import { startDomScanner, type Candidate } from './domScanner';
+import { startDomScanner, type Candidate, type DomScannerController } from './domScanner';
 import App from './ui/App.svelte';
 import {
   keys,
@@ -30,6 +30,21 @@ import { get } from 'svelte/store';
 
 console.info('AIAutoFill content script loaded');
 
+interface OverlaySingleton {
+  destroy: () => void;
+  rescan: () => void;
+  scanner: DomScannerController;
+}
+
+const overlayGlobals = window as unknown as { __AIAutoFillOverlay__?: OverlaySingleton };
+if (overlayGlobals.__AIAutoFillOverlay__) {
+  try {
+    overlayGlobals.__AIAutoFillOverlay__?.destroy();
+  } catch (error) {
+    console.warn('[AIAutoFill] failed to teardown existing overlay before remount', error);
+  }
+}
+
 const currentOrigin = window.location.origin;
 
 // Mount overlay UI
@@ -37,7 +52,6 @@ const host = document.createElement('div');
 host.id = 'aiaf-overlay-host';
 document.documentElement.appendChild(host);
 const app = new App({ target: host });
-void app;
 
 // Semantic configuration derived from environment + runtime settings
 const envSemanticEnabled = (import.meta.env.VITE_SEMANTIC_ENABLED as string) === 'true';
@@ -225,13 +239,14 @@ keys.set(initialConfigs);
 void recomputeBatch(matcherConfig());
 
 const scanner = startDomScanner({
-  throttleMs: 600,
   onCandidates: (result) => {
     const count = result.candidates.length;
     // eslint-disable-next-line no-console
     console.debug(
       '[AIAutoFill] scanned candidates:',
       count,
+      'version',
+      result.version,
       'at',
       new Date(result.scannedAt).toISOString(),
       'durationMs',
@@ -245,6 +260,35 @@ const scanner = startDomScanner({
     refreshHighlights();
   }
 });
+
+let overlayDestroyed = false;
+const destroyOverlay = () => {
+  if (overlayDestroyed) return;
+  overlayDestroyed = true;
+  try {
+    scanner.stop();
+  } catch (error) {
+    console.warn('[AIAutoFill] error stopping scanner', error);
+  }
+  try {
+    app.$destroy();
+  } catch (error) {
+    console.warn('[AIAutoFill] error destroying overlay app', error);
+  }
+  if (host.parentElement) {
+    host.parentElement.removeChild(host);
+  }
+  window.removeEventListener('beforeunload', destroyOverlay);
+  overlayGlobals.__AIAutoFillOverlay__ = undefined;
+};
+
+overlayGlobals.__AIAutoFillOverlay__ = {
+  destroy: destroyOverlay,
+  rescan: () => scanner.rescanNow(),
+  scanner
+};
+
+window.addEventListener('beforeunload', destroyOverlay, { once: true });
 
 // Expose for debugging
 (window as unknown as Record<string, unknown>).__AIAutoFillScanner__ = scanner;

@@ -22,7 +22,7 @@ export interface Rect {
 }
 
 export interface Candidate {
-  id: string; // stable-ish identifier based on path
+  id: string; // stable identity derived from element signature + location
   path: string; // css path inside its root (Document or ShadowRoot)
   framePath: string[]; // css selectors for iframe elements from top-level down to this root
   rootType: 'document' | 'shadow-root' | 'iframe';
@@ -42,16 +42,22 @@ export interface Candidate {
   viewportRect: Rect; // rect relative to top-level window viewport
   accessibleName: AccessibleName;
   description?: string | null; // from aria-describedby if present
+
+  stableElementId: string;
+  robustSelector: string;
+  formGroupId: string;
+  formGroupLabel: string | null;
 }
 
 export interface ScanResult {
+  version: number;
   candidates: Candidate[];
   scannedAt: number;
   durationMs: number;
 }
 
 export interface DomScannerOptions {
-  throttleMs?: number; // default 500ms
+  throttleMs?: number; // default 320ms
   onCandidates?: (result: ScanResult) => void;
 }
 
@@ -60,7 +66,7 @@ export interface DomScannerController {
   rescanNow: () => void;
 }
 
-const DEFAULT_THROTTLE_MS = 600;
+const DEFAULT_THROTTLE_MS = 320;
 
 const CANDIDATE_SELECTOR = [
   // native controls
@@ -74,6 +80,40 @@ const CANDIDATE_SELECTOR = [
   '[role="searchbox"]',
   '[role="combobox"]'
 ].join(',');
+
+const ELEMENT_SIGNATURE_ATTRS = [
+  'id',
+  'name',
+  'type',
+  'placeholder',
+  'autocomplete',
+  'aria-label',
+  'aria-labelledby',
+  'aria-describedby',
+  'role',
+  'data-testid',
+  'data-test-id',
+  'data-qa',
+  'data-qa-id'
+];
+
+const FORM_GROUP_LABEL_ATTRS = [
+  'aria-label',
+  'data-form-label',
+  'data-form-name',
+  'data-form-section',
+  'data-group-label',
+  'title',
+  'name'
+];
+
+const elementIdentityMap = new WeakMap<Element, string>();
+let elementIdentityCounter = 1;
+
+interface FormGroupInfo {
+  id: string;
+  label: string | null;
+}
 
 function isHTMLElement(el: Element): el is HTMLElement {
   return el instanceof HTMLElement;
@@ -181,6 +221,39 @@ function getCssPath(el: Element): string {
   }
 
   return segments.join('>');
+}
+
+function getStableElementId(el: Element): string {
+  const existing = elementIdentityMap.get(el);
+  if (existing) return existing;
+  const next = `el-${elementIdentityCounter++}`;
+  elementIdentityMap.set(el, next);
+  return next;
+}
+
+function attributeSignature(el: Element): string {
+  const pairs: string[] = [];
+  for (const attr of ELEMENT_SIGNATURE_ATTRS) {
+    const value = el.getAttribute(attr);
+    if (value == null) continue;
+    const trimmed = value.trim();
+    if (!trimmed) continue;
+    pairs.push(`${attr}=${trimmed}`);
+  }
+  const classList = Array.from(el.classList)
+    .map((cls) => cls.trim())
+    .filter(Boolean)
+    .slice(0, 5);
+  if (classList.length) {
+    pairs.push(`class=${classList.join('.')}`);
+  }
+  return pairs.join('|') || 'no-signature';
+}
+
+function buildRobustSelector(el: Element, basePath?: string): string {
+  const path = basePath ?? getCssPath(el);
+  const signature = attributeSignature(el);
+  return `${path}|${signature}`;
 }
 
 function findByIdInRoot(root: Document | ShadowRoot, id: string): Element | null {
@@ -380,6 +453,90 @@ function getDescriptionFromAriaDescribedby(el: Element): string | null {
   return parts.length ? parts.join(' ') : null;
 }
 
+function getLabelFromAriaLabelledby(el: Element): string | null {
+  const attr = el.getAttribute('aria-labelledby');
+  if (!attr) return null;
+  const ids = attr.split(/\s+/).filter(Boolean);
+  if (!ids.length) return null;
+  const root = el.getRootNode() as Document | ShadowRoot;
+  const parts: string[] = [];
+  for (const id of ids) {
+    const labelled = findByIdInRoot(root, id);
+    if (!labelled) continue;
+    const text = getInnerTextSafe(labelled).trim();
+    if (text) parts.push(text);
+  }
+  return parts.length ? parts.join(' ') : null;
+}
+
+function fallbackGroupLabel(element: Element, fallback: string): string {
+  if (!isHTMLElement(element)) return fallback;
+  const candidateAttrs = [
+    element.getAttribute('name'),
+    element.getAttribute('data-form-name'),
+    element.getAttribute('data-form-section'),
+    element.getAttribute('data-form-label'),
+    element.getAttribute('data-testid'),
+    element.getAttribute('data-test-id')
+  ];
+  for (const value of candidateAttrs) {
+    if (!value) continue;
+    const trimmed = value.trim();
+    if (trimmed) return `${fallback}: ${trimmed}`;
+  }
+  if (element.id) return `${fallback} #${element.id}`;
+  const classList = Array.from(element.classList);
+  if (classList.length) return `${fallback} .${classList[0]}`;
+  return fallback;
+}
+
+function getFormGroupLabel(el: Element): string | null {
+  if (!isHTMLElement(el)) return null;
+  if (el.tagName.toLowerCase() === 'fieldset') {
+    const legend = el.querySelector('legend');
+    if (legend) {
+      const legendText = getInnerTextSafe(legend).trim();
+      if (legendText) return legendText;
+    }
+  }
+  const labelled = getLabelFromAriaLabelledby(el);
+  if (labelled) return labelled;
+  for (const attr of FORM_GROUP_LABEL_ATTRS) {
+    const value = el.getAttribute(attr);
+    if (value && value.trim()) return value.trim();
+  }
+  return null;
+}
+
+function computeFormGroupInfo(el: Element): FormGroupInfo {
+  const groupCandidates: Array<{ element: Element | null; idPrefix: string; fallback: string }> = [
+    { element: el.closest('form'), idPrefix: 'form', fallback: 'Form' },
+    { element: el.closest('fieldset'), idPrefix: 'fieldset', fallback: 'Fieldset' },
+    { element: el.closest('[role="form"]'), idPrefix: 'role-form', fallback: 'Form Group' },
+    { element: el.closest('[role="group"],[role="radiogroup"]'), idPrefix: 'role-group', fallback: 'Input Group' },
+    { element: el.closest('[data-form-group]'), idPrefix: 'data-form-group', fallback: 'Form Group' },
+    { element: el.closest('[data-form-section]'), idPrefix: 'data-form-section', fallback: 'Form Section' },
+    { element: el.closest('.form-group,.field-group'), idPrefix: 'class-group', fallback: 'Form Group' }
+  ];
+  for (const { element: groupEl, idPrefix, fallback } of groupCandidates) {
+    if (!groupEl) continue;
+    const id = `${idPrefix}:${getCssPath(groupEl)}`;
+    const label = getFormGroupLabel(groupEl) ?? fallbackGroupLabel(groupEl, fallback);
+    return { id, label };
+  }
+  const root = el.getRootNode();
+  if (root instanceof ShadowRoot) {
+    const host = root.host;
+    if (host) {
+      const id = `shadow-root:${getCssPath(host)}`;
+      const label = getFormGroupLabel(host) ?? fallbackGroupLabel(host, 'Shadow Host');
+      return { id, label };
+    }
+    return { id: 'shadow-root:root', label: 'Shadow Root' };
+  }
+  return { id: 'document:root', label: 'Ungrouped Fields' };
+}
+
 function buildCandidate(el: Element, root: Document | ShadowRoot, frameChain: Element[]): Candidate | null {
   if (!isFormControl(el)) return null;
 
@@ -399,6 +556,16 @@ function buildCandidate(el: Element, root: Document | ShadowRoot, frameChain: El
   const isNative = tagName === 'input' || tagName === 'select' || tagName === 'textarea';
   const isCustomControl = !isNative && (isContentEditable || (role ? /^(textbox|searchbox|combobox)$/i.test(role) : false));
 
+  const path = getCssPath(el);
+  const framePath = frameChain.map((f) => getCssPath(f));
+  const frameSignature = framePath.length ? framePath.join('>') : 'top';
+  const formGroup = computeFormGroupInfo(el);
+  const stableElementId = getStableElementId(el);
+  const signature = attributeSignature(el);
+  const robustSelector = buildRobustSelector(el, path);
+  const idSegments = [frameSignature, formGroup.id, robustSelector, stableElementId];
+  const id = idSegments.join('||');
+
   const attributes: Record<string, string | null | undefined> = {
     id: (el as HTMLElement).id || null,
     name: (el as HTMLElement).getAttribute('name'),
@@ -409,21 +576,26 @@ function buildCandidate(el: Element, root: Document | ShadowRoot, frameChain: El
     'aria-label': el.getAttribute('aria-label'),
     'aria-labelledby': el.getAttribute('aria-labelledby'),
     'aria-describedby': el.getAttribute('aria-describedby'),
-    title: (el as HTMLElement).getAttribute('title')
+    title: (el as HTMLElement).getAttribute('title'),
+    'data-testid': el.getAttribute('data-testid'),
+    'data-test-id': el.getAttribute('data-test-id'),
+    'data-qa': el.getAttribute('data-qa'),
+    'data-qa-id': el.getAttribute('data-qa-id'),
+    'data-form-group': el.getAttribute('data-form-group'),
+    'data-form-section': el.getAttribute('data-form-section'),
+    '__signature': signature
   };
 
   const classes = Array.from(el.classList);
-
-  const path = getCssPath(el);
-  const framePath = frameChain.map((f) => getCssPath(f));
-
-  const id = `${framePath.join('>')}||${path}`;
+  const rootType: Candidate['rootType'] = frameChain.length
+    ? 'iframe'
+    : (root instanceof ShadowRoot ? 'shadow-root' : 'document');
 
   return {
     id,
     path,
     framePath,
-    rootType: frameChain.length ? 'iframe' : (root instanceof ShadowRoot ? 'shadow-root' : 'document'),
+    rootType,
     tagName,
     type,
     role,
@@ -435,7 +607,11 @@ function buildCandidate(el: Element, root: Document | ShadowRoot, frameChain: El
     hidden: hiddenAttr,
     viewportRect,
     accessibleName,
-    description: getDescriptionFromAriaDescribedby(el)
+    description: getDescriptionFromAriaDescribedby(el),
+    stableElementId,
+    robustSelector,
+    formGroupId: formGroup.id,
+    formGroupLabel: formGroup.label
   };
 }
 
@@ -476,7 +652,12 @@ function listSameOriginFrames(root: Document | ShadowRoot): HTMLIFrameElement[] 
   return frames;
 }
 
-function scanRoot(root: Document | ShadowRoot, frameChain: Element[], candidates: Candidate[]) {
+function scanRoot(
+  root: Document | ShadowRoot,
+  frameChain: Element[],
+  candidates: Candidate[],
+  seenKeys: Set<string>
+) {
   // 1) candidates within this root
   let nodes: NodeListOf<Element> | null = null;
   try {
@@ -488,7 +669,10 @@ function scanRoot(root: Document | ShadowRoot, frameChain: Element[], candidates
   if (nodes) {
     for (const el of Array.from(nodes)) {
       const cand = buildCandidate(el, root, frameChain);
-      if (cand) candidates.push(cand);
+      if (!cand) continue;
+      if (seenKeys.has(cand.id)) continue;
+      seenKeys.add(cand.id);
+      candidates.push(cand);
     }
   }
 
@@ -497,7 +681,7 @@ function scanRoot(root: Document | ShadowRoot, frameChain: Element[], candidates
   for (const host of shadowHosts) {
     const hostEl = host as HTMLElement & { shadowRoot?: ShadowRoot | null };
     const sr = hostEl.shadowRoot ?? null;
-    if (sr) scanRoot(sr, frameChain, candidates);
+    if (sr) scanRoot(sr, frameChain, candidates, seenKeys);
   }
 
   // 3) recurse into same-origin iframes
@@ -506,12 +690,84 @@ function scanRoot(root: Document | ShadowRoot, frameChain: Element[], candidates
     try {
       const doc = iframe.contentDocument;
       if (doc) {
-        scanRoot(doc, [...frameChain, iframe], candidates);
+        scanRoot(doc, [...frameChain, iframe], candidates, seenKeys);
       }
     } catch {
       // ignore cross-origin frames
     }
   }
+}
+
+function nodeContainsCandidate(node: Node): boolean {
+  if (!(node instanceof Element)) return false;
+  if (isFormControl(node)) return true;
+  try {
+    return Boolean(node.querySelector(CANDIDATE_SELECTOR));
+  } catch {
+    return false;
+  }
+}
+
+function invalidateElementTree(node: Node): void {
+  if (!(node instanceof Element)) return;
+  elementIdentityMap.delete(node);
+  try {
+    const descendants = node.querySelectorAll('*');
+    for (const desc of Array.from(descendants)) {
+      elementIdentityMap.delete(desc);
+    }
+  } catch {
+    // ignore traversal failures
+  }
+}
+
+function mutationsAffectCandidates(records: MutationRecord[]): boolean {
+  let shouldTrigger = false;
+  for (const record of records) {
+    if (record.type === 'childList') {
+      for (const removed of Array.from(record.removedNodes)) {
+        invalidateElementTree(removed);
+        if (!shouldTrigger && nodeContainsCandidate(removed)) {
+          shouldTrigger = true;
+        }
+      }
+      if (!shouldTrigger) {
+        for (const added of Array.from(record.addedNodes)) {
+          if (nodeContainsCandidate(added)) {
+            shouldTrigger = true;
+            break;
+          }
+        }
+      }
+      if (!shouldTrigger) {
+        for (const removed of Array.from(record.removedNodes)) {
+          if (nodeContainsCandidate(removed)) {
+            shouldTrigger = true;
+            break;
+          }
+        }
+      }
+    } else if (record.type === 'attributes') {
+      const target = record.target;
+      if (target instanceof Element) {
+        if (isFormControl(target) || nodeContainsCandidate(target)) {
+          shouldTrigger = true;
+        } else if (record.attributeName && FORM_GROUP_LABEL_ATTRS.includes(record.attributeName)) {
+          shouldTrigger = true;
+        }
+      }
+    } else if (record.type === 'characterData') {
+      const parent = record.target.parentElement;
+      if (parent && nodeContainsCandidate(parent)) {
+        shouldTrigger = true;
+      }
+    }
+    if (shouldTrigger) {
+      // continue loop to allow cleanup on remaining records
+      continue;
+    }
+  }
+  return shouldTrigger;
 }
 
 function nowTs(): number {
@@ -523,18 +779,6 @@ function nowHighRes(): number {
     return performance.now();
   }
   return Date.now();
-}
-
-function uniqueById<T extends { id: string }>(arr: T[]): T[] {
-  const seen = new Set<string>();
-  const out: T[] = [];
-  for (const item of arr) {
-    if (!seen.has(item.id)) {
-      seen.add(item.id);
-      out.push(item);
-    }
-  }
-  return out;
 }
 
 function createThrottler(fn: () => void, wait: number) {
@@ -569,14 +813,23 @@ export function startDomScanner(options: DomScannerOptions = {}): DomScannerCont
   const throttleMs = options.throttleMs ?? DEFAULT_THROTTLE_MS;
   const observers: MutationObserver[] = [];
   const observedRoots = new WeakSet<Document | ShadowRoot>();
+  let scanVersion = 0;
 
   const runScan = () => {
     const start = nowHighRes();
     const candidates: Candidate[] = [];
-    scanRoot(document, [], candidates);
+    const seenKeys = new Set<string>();
+    scanRoot(document, [], candidates, seenKeys);
+    candidates.sort(
+      (a, b) =>
+        a.viewportRect.top - b.viewportRect.top ||
+        a.viewportRect.left - b.viewportRect.left ||
+        a.stableElementId.localeCompare(b.stableElementId)
+    );
     const durationMs = Math.max(0, Number((nowHighRes() - start).toFixed(3)));
     const result: ScanResult = {
-      candidates: uniqueById(candidates),
+      version: ++scanVersion,
+      candidates,
       scannedAt: nowTs(),
       durationMs
     };
@@ -589,8 +842,10 @@ export function startDomScanner(options: DomScannerOptions = {}): DomScannerCont
     if (observedRoots.has(root)) return;
     observedRoots.add(root);
 
-    const obs = new MutationObserver(() => {
-      throttler.schedule();
+    const obs = new MutationObserver((records) => {
+      if (mutationsAffectCandidates(records)) {
+        throttler.schedule();
+      }
     });
     try {
       obs.observe(root, {
@@ -616,7 +871,16 @@ export function startDomScanner(options: DomScannerOptions = {}): DomScannerCont
           'contenteditable',
           'title',
           'value',
-          'hidden'
+          'hidden',
+          'data-form-label',
+          'data-form-name',
+          'data-group-label',
+          'data-form-group',
+          'data-form-section',
+          'data-testid',
+          'data-test-id',
+          'data-qa',
+          'data-qa-id'
         ]
       });
       observers.push(obs);
@@ -624,14 +888,11 @@ export function startDomScanner(options: DomScannerOptions = {}): DomScannerCont
       // ignore observe errors
     }
 
-    // Also proactively observe nested roots from here
-    // shadow
     for (const host of listShadowHosts(root)) {
       const hostEl = host as HTMLElement & { shadowRoot?: ShadowRoot | null };
       const sr = hostEl.shadowRoot ?? null;
       if (sr) observeRoot(sr);
     }
-    // frames
     for (const frame of listSameOriginFrames(root)) {
       try {
         const doc = frame.contentDocument;
@@ -642,15 +903,11 @@ export function startDomScanner(options: DomScannerOptions = {}): DomScannerCont
     }
   }
 
-  // initial observers
   observeRoot(document);
 
-  // handle dynamically added shadow roots and iframes by periodically checking
   const periodicCheck = window.setInterval(() => {
     try {
-      // top-level
       observeRoot(document);
-      // nested
       for (const host of listShadowHosts(document)) {
         const hostEl = host as HTMLElement & { shadowRoot?: ShadowRoot | null };
         const sr = hostEl.shadowRoot ?? null;
@@ -665,7 +922,6 @@ export function startDomScanner(options: DomScannerOptions = {}): DomScannerCont
     }
   }, Math.max(2000, throttleMs * 2));
 
-  // initial scan
   throttler.flush();
 
   return {
@@ -679,6 +935,7 @@ export function startDomScanner(options: DomScannerOptions = {}): DomScannerCont
       }
       observers.length = 0;
       window.clearInterval(periodicCheck);
+      scanVersion = 0;
     },
     rescanNow: () => throttler.flush()
   };
