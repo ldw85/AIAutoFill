@@ -73,6 +73,7 @@ class WorkerError extends Error {
 }
 
 let unlockedKey: CryptoKey | null = null;
+const SESSION_UNLOCK_STORAGE_KEY = 'aiaf.session.unlocked';
 const textEncoder = new TextEncoder();
 
 function handleRuntimeError(reject: (reason?: unknown) => void): boolean {
@@ -109,6 +110,66 @@ function storageLocalRemove(key: string): Promise<void> {
       resolve();
     });
   });
+}
+
+function storageSessionGet<T>(key: string): Promise<T | undefined> {
+  return new Promise((resolve, reject) => {
+    const session = chrome.storage?.session;
+    if (!session) {
+      resolve(undefined);
+      return;
+    }
+    session.get([key], (result) => {
+      if (handleRuntimeError(reject)) return;
+      resolve((result?.[key] as T | undefined) ?? undefined);
+    });
+  });
+}
+
+function storageSessionSet(key: string, value: unknown): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const session = chrome.storage?.session;
+    if (!session) {
+      resolve();
+      return;
+    }
+    session.set({ [key]: value }, () => {
+      if (handleRuntimeError(reject)) return;
+      resolve();
+    });
+  });
+}
+
+function storageSessionRemove(key: string): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const session = chrome.storage?.session;
+    if (!session) {
+      resolve();
+      return;
+    }
+    session.remove(key, () => {
+      if (handleRuntimeError(reject)) return;
+      resolve();
+    });
+  });
+}
+
+async function markSessionUnlocked(): Promise<void> {
+  try {
+    await storageSessionSet(SESSION_UNLOCK_STORAGE_KEY, true);
+  } catch (error) {
+    // eslint-disable-next-line no-console
+    console.warn('[AIAutoFill] failed to mark session unlocked', error);
+  }
+}
+
+async function clearSessionMarker(): Promise<void> {
+  try {
+    await storageSessionRemove(SESSION_UNLOCK_STORAGE_KEY);
+  } catch (error) {
+    // eslint-disable-next-line no-console
+    console.warn('[AIAutoFill] failed to clear session marker', error);
+  }
 }
 
 
@@ -440,18 +501,33 @@ async function handleTemplateDelete(id: string): Promise<RuntimeResponse<Templat
 
 async function handleUnlock(passphrase: string): Promise<RuntimeResponse<UnlockResult>> {
   const result = await unlockWithPassphrase(passphrase);
+  await markSessionUnlocked();
   notifyTemplatesUpdated();
   return { success: true, data: result } satisfies RuntimeResponse<UnlockResult>;
 }
 
 async function handleLock(): Promise<RuntimeResponse<null>> {
   clearUnlockedState();
+  await clearSessionMarker();
   notifyTemplatesUpdated();
   return { success: true, data: null } satisfies RuntimeResponse<null>;
 }
 
+async function handleAttemptRehydrate(): Promise<RuntimeResponse<{ unlocked: boolean }>> {
+  if (unlockedKey) {
+    await markSessionUnlocked();
+    return { success: true, data: { unlocked: true } } satisfies RuntimeResponse<{ unlocked: boolean }>;
+  }
+  const marker = await storageSessionGet<boolean>(SESSION_UNLOCK_STORAGE_KEY);
+  if (marker) {
+    await clearSessionMarker();
+  }
+  return { success: true, data: { unlocked: false } } satisfies RuntimeResponse<{ unlocked: boolean }>;
+}
+
 async function handlePassphraseChange(payload: PassphraseChangePayload): Promise<RuntimeResponse<null>> {
   await changePassphrase(payload);
+  await markSessionUnlocked();
   notifyTemplatesUpdated();
   return { success: true, data: null } satisfies RuntimeResponse<null>;
 }
@@ -528,6 +604,11 @@ chrome.runtime.onMessage.addListener((rawMessage: unknown, _sender, sendResponse
         }
         case 'LOCK': {
           const response = await handleLock();
+          respond(sendResponse, response);
+          return;
+        }
+        case 'ATTEMPT_REHYDRATE': {
+          const response = await handleAttemptRehydrate();
           respond(sendResponse, response);
           return;
         }
