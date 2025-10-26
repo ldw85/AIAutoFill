@@ -13,6 +13,11 @@ import {
   getElementForCandidate,
   scan as scanStore,
   isApplied,
+  templatesStore,
+  sessionUnlocked,
+  effectiveMode as effectiveModeStore,
+  runtimeSettings,
+  semanticEndpoint,
   type KeyConfig
 } from './ui/state';
 import { DEFAULT_KEYS, DEFAULT_VALUES, SYNONYMS_OVERLAY } from './ui/keys';
@@ -23,7 +28,8 @@ import {
   normaliseRuntimeSettings,
   effectiveMode,
   type RuntimeSettings,
-  type TemplateModel
+  type TemplateModel,
+  type Mode
 } from '../core/model/schemas';
 import type { BatchMatchResult, MatchResult } from '../lib/fieldMatcher';
 import { get } from 'svelte/store';
@@ -66,31 +72,54 @@ const embeddingsApiKey = (import.meta.env.VITE_EMBEDDINGS_API_KEY as string) || 
 let semanticCfg: SemanticConfig | undefined;
 
 interface ExtensionSettings {
+  runtime: RuntimeSettings;
   templates: TemplateModel[];
   quickFillTemplateId: string | null;
   quickExtractTemplateId: string | null;
   offlineMode: boolean;
   semanticMatching: boolean;
+  effectiveMode: Mode;
+  unlocked: boolean;
+  semanticEndpoint: string;
 }
 
 let cachedRuntime: RuntimeSettings | null = null;
 let cachedTemplates: TemplateModel[] = [];
+let cachedUnlocked = false;
+
+runtimeSettings.subscribe((value) => {
+  cachedRuntime = value;
+});
+templatesStore.subscribe((list) => {
+  cachedTemplates = list;
+});
+sessionUnlocked.subscribe((value) => {
+  cachedUnlocked = value;
+});
 
 function findTemplate(settings: ExtensionSettings, id?: string | null): TemplateModel | undefined {
   if (!id) return undefined;
   return settings.templates.find((template) => template.id === id);
 }
 
-function extensionSettingsFrom(runtime: RuntimeSettings, templates: TemplateModel[]): ExtensionSettings {
+function extensionSettingsFrom(
+  runtime: RuntimeSettings,
+  templates: TemplateModel[],
+  unlocked: boolean
+): ExtensionSettings {
   const mode = effectiveMode(runtime, currentOrigin);
   const offlineMode = mode !== 'semantic';
   const fallbackTemplate = templates[0]?.id ?? null;
   return {
+    runtime,
     templates,
     quickFillTemplateId: fallbackTemplate,
     quickExtractTemplateId: fallbackTemplate,
     offlineMode,
-    semanticMatching: !offlineMode
+    semanticMatching: !offlineMode,
+    effectiveMode: mode,
+    unlocked,
+    semanticEndpoint: runtime.semanticEndpoint
   };
 }
 
@@ -123,6 +152,7 @@ async function fetchTemplatesFromBackground(): Promise<TemplateModel[]> {
 async function loadSettings(): Promise<ExtensionSettings> {
   let runtime: RuntimeSettings | null = null;
   let templates: TemplateModel[] = [];
+  let unlocked = false;
   try {
     const snapshotResponse = await sendRuntimeMessage<SettingsSnapshot>({
       type: 'SETTINGS_GET',
@@ -135,7 +165,8 @@ async function loadSettings(): Promise<ExtensionSettings> {
         overrides: snap.overrides,
         semanticEndpoint: snap.semanticEndpoint
       });
-      if (snap.unlocked) {
+      unlocked = Boolean(snap.unlocked);
+      if (unlocked) {
         templates = await fetchTemplatesFromBackground();
       }
     } else if (snapshotResponse.error) {
@@ -150,20 +181,33 @@ async function loadSettings(): Promise<ExtensionSettings> {
     runtime = normaliseRuntimeSettings(stored);
   }
 
-  if (!templates.length && cachedTemplates.length) {
-    templates = cachedTemplates;
+  if (unlocked) {
+    if (!templates.length && cachedTemplates.length) {
+      templates = cachedTemplates;
+    }
+  } else {
+    templates = [];
   }
 
   cachedRuntime = runtime;
   cachedTemplates = templates;
-  return extensionSettingsFrom(runtime, templates);
+  cachedUnlocked = unlocked;
+  const settings = extensionSettingsFrom(runtime, templates, unlocked);
+  cachedEffectiveMode = settings.effectiveMode;
+  return settings;
 }
 
 async function refreshTemplates(): Promise<void> {
   if (!cachedRuntime) return;
+  if (!cachedUnlocked) {
+    cachedTemplates = [];
+    const settings = extensionSettingsFrom(cachedRuntime, cachedTemplates, cachedUnlocked);
+    applySettings(settings);
+    return;
+  }
   const templates = await fetchTemplatesFromBackground();
   cachedTemplates = templates;
-  const settings = extensionSettingsFrom(cachedRuntime, cachedTemplates);
+  const settings = extensionSettingsFrom(cachedRuntime, cachedTemplates, cachedUnlocked);
   applySettings(settings);
 }
 
@@ -207,6 +251,12 @@ function templateValues(settings: ExtensionSettings): Record<string, unknown> | 
 }
 
 function applySettings(settings: ExtensionSettings): void {
+  runtimeSettings.set(settings.runtime);
+  sessionUnlocked.set(settings.unlocked);
+  effectiveModeStore.set(settings.effectiveMode);
+  semanticEndpoint.set(settings.semanticEndpoint);
+  templatesStore.set(settings.templates);
+
   semanticCfg = computeSemanticConfig(settings);
   const values = templateValues(settings);
   const configs = buildKeyConfigs(values, !values);
@@ -228,7 +278,7 @@ chrome.storage.onChanged.addListener((changes, areaName) => {
   const nextRaw = changes[SETTINGS_STORAGE_KEY]?.newValue as unknown;
   const runtime = normaliseRuntimeSettings(nextRaw);
   cachedRuntime = runtime;
-  const settings = extensionSettingsFrom(runtime, cachedTemplates);
+  const settings = extensionSettingsFrom(runtime, cachedTemplates, cachedUnlocked);
   applySettings(settings);
   void refreshTemplates();
 });

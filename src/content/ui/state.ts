@@ -1,6 +1,7 @@
 import { writable, derived, get } from 'svelte/store';
 import type { Candidate, ScanResult, FormGroup, Rect } from '../domScanner';
 import type { OntologyKey } from '../../lib/ontology';
+import type { Mode, RuntimeSettings, TemplateModel } from '../../core/model/schemas';
 import {
   DEFAULT_MATCHER_CONFIG,
   type MatcherConfig,
@@ -30,6 +31,12 @@ export interface CandidateView {
 
 export const overlayVisible = writable(true);
 export const panelOpen = writable(false);
+
+export const runtimeSettings = writable<RuntimeSettings | null>(null);
+export const effectiveMode = writable<Mode>('offline');
+export const sessionUnlocked = writable(false);
+export const semanticEndpoint = writable('');
+export const templatesStore = writable<TemplateModel[]>([]);
 
 export const keys = writable<KeyConfig[]>([]);
 export const scan = writable<ScanResult | null>(null);

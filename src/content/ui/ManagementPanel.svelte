@@ -17,8 +17,16 @@
   } from './state';
   import type { CandidateView } from './state';
   import FormsTab from './FormsTab.svelte';
+  import ExtractSeoPanel from '../../ui/overlay/ExtractSeoPanel.svelte';
   import type { BatchMatchResult, MatchResult } from '../../lib/fieldMatcher';
-  import { listTemplates, saveTemplate, extractValuesFromPage, normalizeLabel, type MappingPreferenceEntry } from '../templates';
+  import {
+    listTemplates,
+    saveTemplate,
+    extractValuesFromPage,
+    normalizeLabel,
+    type MappingPreferenceEntry
+  } from '../templates';
+
   import {
     rememberPassphrase,
     loadUserPreferences,
@@ -26,11 +34,12 @@
     buildPreferenceInputsFromSelection
   } from '../learning';
 
-  let tab: 'forms' | 'preview' | 'templates' = 'forms';
+  let tab: 'forms' | 'preview' | 'seo' | 'templates' = 'forms';
   let passphrase = '';
   let templateName = '';
   let saving = false;
   let message = '';
+
   let templateList: Array<{ name: string; versions: number[] }> = [];
 
   // mapping selection per candidate id -> ontology key
@@ -267,6 +276,7 @@
     <div class="tabs">
       <button class:active={tab==='forms'} on:click={() => tab='forms'}>Forms</button>
       <button class:active={tab==='preview'} on:click={() => tab='preview'}>Preview</button>
+      <button class:active={tab==='seo'} on:click={() => tab='seo'}>SEO</button>
       <button class:active={tab==='templates'} on:click={() => tab='templates'}>Templates</button>
     </div>
     <div class="header-actions">
@@ -302,6 +312,10 @@
         <button on:click={() => applyAll()}>Apply All</button>
         <button on:click={() => undoAll()}>Undo All</button>
       </footer>
+    </div>
+  {:else if tab === 'seo'}
+    <div class="body">
+      <ExtractSeoPanel />
     </div>
   {:else}
     <div class="body">
