@@ -1,7 +1,22 @@
 <script lang="ts">
   import { onMount, onDestroy } from 'svelte';
-  import { batch, candidatesView, keys, panelOpen, scan, readCandidateValue, applyAll, undoAll, applyCandidate, undoCandidate } from './state';
+  import {
+    batch,
+    candidatesView,
+    keys,
+    panelOpen,
+    scan,
+    readCandidateValue,
+    applyAll,
+    undoAll,
+    applyCandidate,
+    undoCandidate,
+    formGroups,
+    selectedFormGroupId,
+    setSelectedFormGroup
+  } from './state';
   import type { CandidateView } from './state';
+  import FormsTab from './FormsTab.svelte';
   import type { BatchMatchResult, MatchResult } from '../../lib/fieldMatcher';
   import { listTemplates, saveTemplate, extractValuesFromPage, normalizeLabel, type MappingPreferenceEntry } from '../templates';
   import {
@@ -11,7 +26,7 @@
     buildPreferenceInputsFromSelection
   } from '../learning';
 
-  let tab: 'preview' | 'templates' = 'preview';
+  let tab: 'forms' | 'preview' | 'templates' = 'forms';
   let passphrase = '';
   let templateName = '';
   let saving = false;
@@ -25,10 +40,7 @@
   const VIRTUAL_ROW_HEIGHT = 48;
   const VIRTUAL_OVERSCAN = 6;
 
-  let selectedGroup = 'all';
-  let lastSelectedGroup = 'all';
   let candidateListEl: HTMLElement | null = null;
-  let formGroupOptions: Array<{ id: string; label: string; count: number }> = [];
   let filteredCandidates: CandidateView[] = [];
   let visibleCandidates: CandidateView[] = [];
   let virtualizationEnabled = false;
@@ -38,6 +50,7 @@
   let virtualStart = 0;
   let virtualEnd = 0;
   let resizeObserver: ResizeObserver | null = null;
+  let lastGroupForList: string | null = null;
 
   function origin(): string { return location.origin; }
 
@@ -184,41 +197,30 @@
     recomputeVirtualWindow();
   }
 
-  $: formGroupOptions = (() => {
-    const map = new Map<string, { label: string; count: number }>();
-    const currentScan = $scan;
-    if (currentScan) {
-      for (const cand of currentScan.candidates) {
-        const id = cand.formGroupId || 'document:root';
-        const label = (cand.formGroupLabel || 'Ungrouped Fields').trim() || 'Ungrouped Fields';
-        const entry = map.get(id);
-        if (entry) entry.count += 1;
-        else map.set(id, { label, count: 1 });
-      }
+  function handleGroupChange(event: Event) {
+    const target = event.currentTarget as HTMLSelectElement | null;
+    if (!target) return;
+    const value = target.value;
+    if (value) {
+      setSelectedFormGroup(value);
     }
-    return Array.from(map.entries())
-      .map(([id, entry]) => ({ id, label: entry.label, count: entry.count }))
-      .sort((a, b) => a.label.localeCompare(b.label));
-  })();
-
-  $: if (selectedGroup !== 'all' && !formGroupOptions.some((opt) => opt.id === selectedGroup)) {
-    selectedGroup = 'all';
   }
 
-  $: if (selectedGroup !== lastSelectedGroup) {
-    if (candidateListEl) {
-      candidateListEl.scrollTop = 0;
-    }
-    lastSelectedGroup = selectedGroup;
-  }
-
-  $: filteredCandidates = $candidatesView.filter((cv) => selectedGroup === 'all' || cv.candidate.formGroupId === selectedGroup);
+  $: filteredCandidates = $candidatesView;
 
   $: totalCandidates = filteredCandidates.length;
 
   $: virtualizationEnabled = totalCandidates > VIRTUALIZATION_THRESHOLD;
 
   $: recomputeVirtualWindow();
+
+  $: {
+    const currentGroup = $selectedFormGroupId;
+    if (candidateListEl && currentGroup !== lastGroupForList) {
+      candidateListEl.scrollTop = 0;
+      lastGroupForList = currentGroup;
+    }
+  }
 
   $: {
     if (candidateListEl) {
@@ -263,6 +265,7 @@
   <header>
     <strong>AIAutoFill</strong>
     <div class="tabs">
+      <button class:active={tab==='forms'} on:click={() => tab='forms'}>Forms</button>
       <button class:active={tab==='preview'} on:click={() => tab='preview'}>Preview</button>
       <button class:active={tab==='templates'} on:click={() => tab='templates'}>Templates</button>
     </div>
@@ -272,7 +275,11 @@
     </div>
   </header>
 
-  {#if tab === 'preview'}
+  {#if tab === 'forms'}
+    <div class="body forms-body">
+      <FormsTab />
+    </div>
+  {:else if tab === 'preview'}
     <div class="body">
       {#each $keys as kc}
         {#if bestForKey($batch, kc.key.key)}
@@ -324,11 +331,19 @@
           </div>
           <div class="control-group">
             <label for="aiaf-group-filter">Group</label>
-            <select id="aiaf-group-filter" bind:value={selectedGroup}>
-              <option value="all">All groups</option>
-              {#each formGroupOptions as group}
-                <option value={group.id}>{group.label} ({group.count})</option>
-              {/each}
+            <select
+              id="aiaf-group-filter"
+              on:change={handleGroupChange}
+            >
+              {#if $formGroups.length === 0}
+                <option value="">No groups</option>
+              {:else}
+                {#each $formGroups as group}
+                  <option value={group.id} selected={group.id === $selectedFormGroupId}>
+                    {group.label} ({group.fieldCount})
+                  </option>
+                {/each}
+              {/if}
             </select>
           </div>
         </div>

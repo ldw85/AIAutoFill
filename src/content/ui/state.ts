@@ -1,5 +1,5 @@
 import { writable, derived, get } from 'svelte/store';
-import type { Candidate, ScanResult } from '../domScanner';
+import type { Candidate, ScanResult, FormGroup, Rect } from '../domScanner';
 import type { OntologyKey } from '../../lib/ontology';
 import {
   DEFAULT_MATCHER_CONFIG,
@@ -34,6 +34,17 @@ export const panelOpen = writable(false);
 export const keys = writable<KeyConfig[]>([]);
 export const scan = writable<ScanResult | null>(null);
 export const batch = writable<BatchMatchResult | null>(null);
+export const formGroups = writable<FormGroup[]>([]);
+export const selectedFormGroupId = writable<string | null>(null);
+export const hoveredFormGroupId = writable<string | null>(null);
+
+let candidateIndex = new Map<string, Candidate>();
+let lastSelectedGroupId: string | null = null;
+let groupHighlightSelected: HTMLDivElement | null = null;
+let groupHighlightHover: HTMLDivElement | null = null;
+let highlightListenersAttached = false;
+let currentSelectedHighlightId: string | null = null;
+let currentHoveredHighlightId: string | null = null;
 
 interface LearningState {
   synonyms: Record<string, string[]>;
@@ -116,11 +127,14 @@ function mergePreferenceSources(...sources: Array<PreferenceMap | undefined>): P
   return result;
 }
 
-export const candidatesView = derived([scan, batch, keys], ([$scan, $batch, $keys]) => {
+export const candidatesView = derived([scan, batch, keys, selectedFormGroupId], ([$scan, $batch, $keys, $selectedGroup]) => {
   const out: CandidateView[] = [];
   if (!$scan || !$batch) return out;
   const byCand = $batch.byCandidate;
-  for (const cand of $scan.candidates) {
+  const candidates = $selectedGroup
+    ? $scan.candidates.filter((cand) => cand.formGroupId === $selectedGroup)
+    : $scan.candidates;
+  for (const cand of candidates) {
     const results = byCand[cand.id] || [];
     const best = results[0];
     const view: CandidateView = { candidate: cand };
@@ -143,20 +157,113 @@ export function setKeys(list: KeyConfig[], cfg?: Partial<MatcherConfig> & { sema
   void recomputeBatch(cfg);
 }
 
+function candidatesForGroup(all: Candidate[], groupId: string | null): Candidate[] {
+  if (!groupId) return all;
+  return all.filter((cand) => cand.formGroupId === groupId);
+}
+
+function internalSetSelectedFormGroup(id: string | null, options?: { silent?: boolean }) {
+  const current = get(selectedFormGroupId);
+  if (current === id) {
+    if (!options?.silent) {
+      refreshGroupHighlightPositions();
+    }
+    return;
+  }
+  selectedFormGroupId.set(id);
+  lastSelectedGroupId = id;
+  if (options?.silent) {
+    refreshGroupHighlightPositions();
+    return;
+  }
+  void (async () => {
+    await recomputeBatch();
+    refreshHighlights();
+    refreshGroupHighlightPositions();
+  })();
+}
+
+function ensureSelectionForScan(result: ScanResult): void {
+  const groups = result.formGroups || [];
+  if (!groups.length) {
+    lastSelectedGroupId = null;
+    if (get(selectedFormGroupId) !== null) {
+      selectedFormGroupId.set(null);
+    }
+    return;
+  }
+  const current = get(selectedFormGroupId);
+  if (current && groups.some((g) => g.id === current)) {
+    lastSelectedGroupId = current;
+    return;
+  }
+  if (lastSelectedGroupId && groups.some((g) => g.id === lastSelectedGroupId)) {
+    internalSetSelectedFormGroup(lastSelectedGroupId, { silent: true });
+    return;
+  }
+  const firstId = groups[0]?.id ?? null;
+  internalSetSelectedFormGroup(firstId, { silent: true });
+}
+
+export function setSelectedFormGroup(id: string): void {
+  internalSetSelectedFormGroup(id, { silent: false });
+}
+
+export function setHoveredFormGroup(id: string | null): void {
+  hoveredFormGroupId.set(id);
+}
+
+export function clearHoveredFormGroup(): void {
+  hoveredFormGroupId.set(null);
+}
+
+export async function fillAllGroups(): Promise<number> {
+  const groups = get(formGroups);
+  if (!groups.length) return 0;
+  const original = get(selectedFormGroupId);
+  let total = 0;
+  for (const group of groups) {
+    internalSetSelectedFormGroup(group.id, { silent: true });
+    await recomputeBatch();
+    total += applyAll();
+  }
+  if (original && groups.some((g) => g.id === original)) {
+    internalSetSelectedFormGroup(original, { silent: true });
+  } else if (groups.length) {
+    internalSetSelectedFormGroup(groups[0].id, { silent: true });
+  } else {
+    internalSetSelectedFormGroup(null, { silent: true });
+  }
+  await recomputeBatch();
+  refreshHighlights();
+  refreshGroupHighlightPositions();
+  return total;
+}
+
 export function updateScan(result: ScanResult, cfg?: Partial<MatcherConfig> & { semantic?: SemanticConfig }) {
   const current = get(scan);
   if (current && result.version <= current.version) {
     return;
   }
   scan.set(result);
+  candidateIndex = new Map(result.candidates.map((cand) => [cand.id, cand]));
+  formGroups.set(result.formGroups);
+  ensureSelectionForScan(result);
   pruneAppliedForCurrentScan(result);
+  refreshGroupHighlightPositions();
   void recomputeBatch(cfg);
 }
 
 export async function recomputeBatch(cfg?: Partial<MatcherConfig> & { semantic?: SemanticConfig }) {
   const s = get(scan);
+  const selectedGroup = get(selectedFormGroupId);
   const k = get(keys).map((x) => x.key);
   if (!s || k.length === 0) {
+    batch.set(null);
+    return;
+  }
+  const candidates = candidatesForGroup(s.candidates, selectedGroup);
+  if (!candidates.length) {
     batch.set(null);
     return;
   }
@@ -180,13 +287,13 @@ export async function recomputeBatch(cfg?: Partial<MatcherConfig> & { semantic?:
     preferences,
     semantic: cfg?.semantic
   } as MatcherConfig & { semantic?: SemanticConfig };
-  const b = computeBatchMatches(k, s.candidates, config);
+  const b = computeBatchMatches(k, candidates, config);
   batch.set(b);
 
   // Optional semantic reranking (async)
   if (config.semantic?.enabled && config.semantic.apiUrl) {
     logSemanticPrivacyNoticeOnce(config.semantic);
-    const reranked = await rerankWithSemantics(b, k, s.candidates, config);
+    const reranked = await rerankWithSemantics(b, k, candidates, config);
     batch.set(reranked);
   }
 }
@@ -281,6 +388,155 @@ function setHighlight(el: HTMLElement, status?: UIStatus) {
   if (status === 'filled') el.classList.add('aiaf-highlight-filled');
 }
 
+const GROUP_HIGHLIGHT_PADDING = 8;
+
+function ensureGroupHighlightLayers(): void {
+  if (groupHighlightSelected && groupHighlightHover) return;
+  const root = document.body || document.documentElement;
+  if (!root) return;
+  if (!groupHighlightSelected) {
+    groupHighlightSelected = document.createElement('div');
+    groupHighlightSelected.className = 'aiaf-formgroup-highlight selected';
+    groupHighlightSelected.setAttribute('aria-hidden', 'true');
+    root.appendChild(groupHighlightSelected);
+  }
+  if (!groupHighlightHover) {
+    groupHighlightHover = document.createElement('div');
+    groupHighlightHover.className = 'aiaf-formgroup-highlight hover';
+    groupHighlightHover.setAttribute('aria-hidden', 'true');
+    root.appendChild(groupHighlightHover);
+  }
+  if (!highlightListenersAttached) {
+    const handler = () => refreshGroupHighlightPositions();
+    window.addEventListener('scroll', handler, true);
+    window.addEventListener('resize', handler, true);
+    highlightListenersAttached = true;
+  }
+}
+
+function positionHighlightElement(target: HTMLDivElement | null, rect: Rect | null): void {
+  if (!target) return;
+  if (!rect) {
+    target.style.display = 'none';
+    return;
+  }
+  const pad = GROUP_HIGHLIGHT_PADDING;
+  const width = Math.max(0, rect.width + pad * 2);
+  const height = Math.max(0, rect.height + pad * 2);
+  const top = Math.max(0, rect.top - pad);
+  const left = Math.max(0, rect.left - pad);
+  target.style.display = 'block';
+  target.style.top = `${top}px`;
+  target.style.left = `${left}px`;
+  target.style.width = `${width}px`;
+  target.style.height = `${height}px`;
+}
+
+function computeCandidateViewportRect(cand: Candidate): Rect | null {
+  const el = getElementForCandidate(cand);
+  if (!el) return null;
+  try {
+    const baseRect = el.getBoundingClientRect();
+    let top = baseRect.top;
+    let left = baseRect.left;
+    let right = baseRect.right;
+    let bottom = baseRect.bottom;
+    if (cand.framePath && cand.framePath.length) {
+      let root: Document | ShadowRoot | null = document;
+      for (const sel of cand.framePath) {
+        const frame = root?.querySelector(sel) as HTMLIFrameElement | null;
+        if (!frame) return null;
+        const frameRect = frame.getBoundingClientRect();
+        top += frameRect.top;
+        bottom += frameRect.top;
+        left += frameRect.left;
+        right += frameRect.left;
+        root = frame.contentDocument;
+      }
+    }
+    return {
+      top,
+      left,
+      right,
+      bottom,
+      width: Math.max(0, right - left),
+      height: Math.max(0, bottom - top)
+    };
+  } catch {
+    return null;
+  }
+}
+
+function computeGroupViewportRect(groupId: string | null): Rect | null {
+  if (!groupId) return null;
+  const currentScan = get(scan);
+  if (!currentScan) return null;
+  const group = currentScan.formGroups.find((g) => g.id === groupId);
+  if (!group) return null;
+  let top = Number.POSITIVE_INFINITY;
+  let left = Number.POSITIVE_INFINITY;
+  let right = Number.NEGATIVE_INFINITY;
+  let bottom = Number.NEGATIVE_INFINITY;
+  let found = false;
+  for (const candId of group.candidateIds) {
+    const cand = candidateIndex.get(candId);
+    if (!cand) continue;
+    const rect = computeCandidateViewportRect(cand);
+    if (!rect) continue;
+    found = true;
+    top = Math.min(top, rect.top);
+    left = Math.min(left, rect.left);
+    right = Math.max(right, rect.right);
+    bottom = Math.max(bottom, rect.bottom);
+  }
+  if (!found) {
+    const fallback = group.outlineRect;
+    if (!fallback) return null;
+    return fallback;
+  }
+  return {
+    top,
+    left,
+    right,
+    bottom,
+    width: Math.max(0, right - left),
+    height: Math.max(0, bottom - top)
+  };
+}
+
+function applyGroupHighlight(kind: 'selected' | 'hover', groupId: string | null): void {
+  ensureGroupHighlightLayers();
+  const rect = computeGroupViewportRect(groupId);
+  if (kind === 'selected') {
+    positionHighlightElement(groupHighlightSelected, rect);
+  } else {
+    positionHighlightElement(groupHighlightHover, rect);
+  }
+}
+
+function refreshGroupHighlightPositions(): void {
+  if (currentSelectedHighlightId) {
+    applyGroupHighlight('selected', currentSelectedHighlightId);
+  } else if (groupHighlightSelected) {
+    groupHighlightSelected.style.display = 'none';
+  }
+  if (currentHoveredHighlightId) {
+    applyGroupHighlight('hover', currentHoveredHighlightId);
+  } else if (groupHighlightHover) {
+    groupHighlightHover.style.display = 'none';
+  }
+}
+
+selectedFormGroupId.subscribe((id) => {
+  currentSelectedHighlightId = id;
+  applyGroupHighlight('selected', id);
+});
+
+hoveredFormGroupId.subscribe((id) => {
+  currentHoveredHighlightId = id;
+  applyGroupHighlight('hover', id);
+});
+
 export function applyCandidate(cand: Candidate, match: MatchResult, value: unknown): FillResult | null {
   const el = getElementForCandidate(cand);
   if (!el) return null;
@@ -343,20 +599,29 @@ export function applyAll(): number {
 export function undoAll(): number {
   const s = get(scan);
   if (!s) return 0;
+  const selectedGroup = get(selectedFormGroupId);
+  const candidates = candidatesForGroup(s.candidates, selectedGroup);
   let count = 0;
-  for (const cand of s.candidates) {
+  for (const cand of candidates) {
     if (undoCandidate(cand)) count++;
   }
   return count;
 }
 
 export function refreshHighlights() {
+  const currentScan = get(scan);
+  if (!currentScan) return;
   const cvs = get(candidatesView);
-  for (const v of cvs) {
-    const el = getElementForCandidate(v.candidate);
+  const viewById = new Map<string, CandidateView>();
+  for (const view of cvs) {
+    viewById.set(view.candidate.id, view);
+  }
+  for (const cand of currentScan.candidates) {
+    const el = getElementForCandidate(cand);
     if (!el) continue;
-    const applied = isApplied(v.candidate.id);
-    const status: UIStatus | undefined = applied ? 'filled' : v.status;
+    const applied = isApplied(cand.id);
+    const view = viewById.get(cand.id);
+    const status: UIStatus | undefined = applied ? 'filled' : view?.status;
     setHighlight(el, status);
   }
 }
