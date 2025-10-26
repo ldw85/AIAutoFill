@@ -49,6 +49,44 @@ export function ensureOverlayStyles(): void {
   .aiaf-highlight-pending { outline: 2px solid rgba(245, 158, 11, 0.9); outline-offset: 2px; }
   .aiaf-highlight-uncertain { outline: 2px dashed rgba(239, 68, 68, 0.9); outline-offset: 2px; }
   .aiaf-highlight-filled { outline: 2px solid rgba(34, 197, 94, 0.9); outline-offset: 2px; }
+
+  /* Form group highlights */
+  .aiaf-formgroup-highlight {
+    position: fixed;
+    pointer-events: none;
+    border: 2px solid rgba(45, 108, 223, 0.45);
+    border-radius: 10px;
+    box-shadow: 0 0 0 2px rgba(45, 108, 223, 0.18);
+    z-index: 2147483647;
+    display: none;
+  }
+  .aiaf-formgroup-highlight.hover {
+    border-style: dashed;
+    border-color: rgba(45, 108, 223, 0.8);
+  }
+  .aiaf-formgroup-highlight.selected {
+    border-color: rgba(45, 108, 223, 0.95);
+    box-shadow: 0 0 0 2px rgba(45, 108, 223, 0.28);
+  }
+
+  /* Forms tab */
+  .aiaf-forms-tab { display: flex; flex-direction: column; gap: 12px; }
+  .aiaf-forms-tab .controls { display: flex; gap: 8px; }
+  .aiaf-forms-tab .controls button { font-size: 12px; padding: 4px 8px; border-radius: 6px; border: 1px solid #d1d5db; background: #f9fafb; cursor: pointer; }
+  .aiaf-forms-tab .controls button.primary { background: #2d6cdf; border-color: #2d6cdf; color: #fff; }
+  .aiaf-forms-tab .controls button.secondary { background: #f3f4f6; }
+  .aiaf-forms-tab .controls button:disabled { opacity: 0.6; cursor: default; }
+  .aiaf-forms-tab .message { font-size: 12px; color: #1f2937; background: #f3f4f6; padding: 6px 8px; border-radius: 6px; }
+  .aiaf-forms-tab .group-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 8px; }
+  .aiaf-forms-tab .group-list li { list-style: none; }
+  .aiaf-forms-tab .group-list button { width: 100%; border: 1px solid #e5e7eb; border-radius: 8px; padding: 8px 10px; cursor: pointer; background: #fff; display: flex; flex-direction: column; align-items: flex-start; gap: 4px; transition: border-color 0.2s ease, box-shadow 0.2s ease, background 0.2s ease; }
+  .aiaf-forms-tab .group-list button:hover { border-color: #2d6cdf; box-shadow: 0 0 0 1px rgba(45, 108, 223, 0.25); }
+  .aiaf-forms-tab .group-list li.selected button { border-color: #2d6cdf; background: #eef2ff; box-shadow: 0 0 0 1px rgba(45, 108, 223, 0.35); }
+  .aiaf-forms-tab .group-list .label { font-weight: 600; font-size: 13px; color: #111827; }
+  .aiaf-forms-tab .group-list .hint { font-size: 11px; color: #4b5563; }
+  .aiaf-forms-tab .group-list .meta { font-size: 11px; color: #6b7280; }
+  .aiaf-forms-tab .empty-state { font-size: 12px; color: #6b7280; padding: 12px; border: 1px dashed #d1d5db; border-radius: 8px; text-align: center; }
+  .forms-body { padding: 8px 12px; }
   `;
   document.head.appendChild(style);
   injected = true;

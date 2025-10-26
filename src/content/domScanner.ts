@@ -49,9 +49,41 @@ export interface Candidate {
   formGroupLabel: string | null;
 }
 
+export type FormGroupSource = 'form' | 'fieldset' | 'aria' | 'container' | 'shadow-root' | 'single';
+
+export interface FormGroup {
+  id: string;
+  label: string;
+  hint: string | null;
+  source: FormGroupSource;
+  fieldCount: number;
+  candidateIds: string[];
+  framePath: string[];
+  rootType: Candidate['rootType'];
+  outlineRect: Rect;
+}
+
+interface CandidateContext {
+  element: Element;
+  candidate: Candidate;
+  root: Document | ShadowRoot;
+  frameChain: Element[];
+}
+
+interface GroupAccumulator {
+  id: string;
+  label: string;
+  hint: string | null;
+  source: FormGroupSource;
+  framePath: string[];
+  rootType: Candidate['rootType'];
+  candidates: CandidateContext[];
+}
+
 export interface ScanResult {
   version: number;
   candidates: Candidate[];
+  formGroups: FormGroup[];
   scannedAt: number;
   durationMs: number;
 }
@@ -107,13 +139,28 @@ const FORM_GROUP_LABEL_ATTRS = [
   'name'
 ];
 
+const SUBMIT_SELECTOR = 'button[type="submit"],input[type="submit"],input[type="image"],button:not([type]):not([disabled]),[data-submit],[data-action="submit"]';
+const HEADING_SELECTOR = 'h1,h2,h3,h4,h5,h6,[role="heading"],.form-title,.section-title,.heading,.title';
+const GROUP_LIKE_CLASS_SELECTOR = '.form-group,.field-group,.form-section,.form-block,.form-panel,.field-section,.auth-form,.login-form';
+const MAX_ANCESTOR_DEPTH = 24;
+
+const STRUCTURAL_GROUP_DEFS: Array<{ selector: string; source: FormGroupSource; fallback: string }> = [
+  { selector: 'form', source: 'form', fallback: 'Form' },
+  { selector: 'fieldset', source: 'fieldset', fallback: 'Fieldset' },
+  { selector: '[role="form"]', source: 'aria', fallback: 'Form' },
+  { selector: '[role="group"]', source: 'aria', fallback: 'Input Group' },
+  { selector: '[role="radiogroup"]', source: 'aria', fallback: 'Options' },
+  { selector: '[data-form-group]', source: 'container', fallback: 'Form Group' },
+  { selector: '[data-form-section]', source: 'container', fallback: 'Form Section' },
+  { selector: GROUP_LIKE_CLASS_SELECTOR, source: 'container', fallback: 'Form Group' }
+];
+
+let submitPresenceCache = new WeakMap<Element, boolean>();
+let headingCache = new WeakMap<Element, string | null>();
+let actionTextCache = new WeakMap<Element, string | null>();
+
 const elementIdentityMap = new WeakMap<Element, string>();
 let elementIdentityCounter = 1;
-
-interface FormGroupInfo {
-  id: string;
-  label: string | null;
-}
 
 function isHTMLElement(el: Element): el is HTMLElement {
   return el instanceof HTMLElement;
@@ -508,36 +555,410 @@ function getFormGroupLabel(el: Element): string | null {
   return null;
 }
 
-function computeFormGroupInfo(el: Element): FormGroupInfo {
-  const groupCandidates: Array<{ element: Element | null; idPrefix: string; fallback: string }> = [
-    { element: el.closest('form'), idPrefix: 'form', fallback: 'Form' },
-    { element: el.closest('fieldset'), idPrefix: 'fieldset', fallback: 'Fieldset' },
-    { element: el.closest('[role="form"]'), idPrefix: 'role-form', fallback: 'Form Group' },
-    { element: el.closest('[role="group"],[role="radiogroup"]'), idPrefix: 'role-group', fallback: 'Input Group' },
-    { element: el.closest('[data-form-group]'), idPrefix: 'data-form-group', fallback: 'Form Group' },
-    { element: el.closest('[data-form-section]'), idPrefix: 'data-form-section', fallback: 'Form Section' },
-    { element: el.closest('.form-group,.field-group'), idPrefix: 'class-group', fallback: 'Form Group' }
-  ];
-  for (const { element: groupEl, idPrefix, fallback } of groupCandidates) {
-    if (!groupEl) continue;
-    const id = `${idPrefix}:${getCssPath(groupEl)}`;
-    const label = getFormGroupLabel(groupEl) ?? fallbackGroupLabel(groupEl, fallback);
-    return { id, label };
-  }
-  const root = el.getRootNode();
-  if (root instanceof ShadowRoot) {
-    const host = root.host;
-    if (host) {
-      const id = `shadow-root:${getCssPath(host)}`;
-      const label = getFormGroupLabel(host) ?? fallbackGroupLabel(host, 'Shadow Host');
-      return { id, label };
-    }
-    return { id: 'shadow-root:root', label: 'Shadow Root' };
-  }
-  return { id: 'document:root', label: 'Ungrouped Fields' };
+function frameSignatureFromPath(framePath: string[]): string {
+  return framePath.length ? framePath.join('>') : 'top';
 }
 
-function buildCandidate(el: Element, root: Document | ShadowRoot, frameChain: Element[]): Candidate | null {
+function getBoundingRectSafe(el: Element): Rect | null {
+  if (!isHTMLElement(el) || !el.isConnected) return null;
+  try {
+    const r = el.getBoundingClientRect();
+    return { top: r.top, left: r.left, right: r.right, bottom: r.bottom, width: r.width, height: r.height };
+  } catch {
+    return null;
+  }
+}
+
+function isSubmitElement(el: Element): boolean {
+  if (el instanceof HTMLButtonElement) {
+    const type = (el.getAttribute('type') || 'submit').toLowerCase();
+    return !type || type === 'submit';
+  }
+  if (el instanceof HTMLInputElement) {
+    const type = (el.type || '').toLowerCase();
+    return type === 'submit' || type === 'image';
+  }
+  if (isHTMLElement(el)) {
+    if (el.getAttribute('data-submit') != null) return true;
+    if ((el.getAttribute('data-action') || '').toLowerCase() === 'submit') return true;
+  }
+  return false;
+}
+
+function hasSubmitControl(element: Element): boolean {
+  if (submitPresenceCache.has(element)) {
+    return submitPresenceCache.get(element) ?? false;
+  }
+  let found = false;
+  if (isSubmitElement(element)) {
+    found = true;
+  } else {
+    try {
+      const match = element.querySelector(SUBMIT_SELECTOR);
+      if (match) found = true;
+    } catch {
+      found = false;
+    }
+  }
+  submitPresenceCache.set(element, found);
+  return found;
+}
+
+function collectAncestry(el: Element, limit = MAX_ANCESTOR_DEPTH): Element[] {
+  const ancestry: Element[] = [];
+  const seen = new Set<Element>();
+  let node: Element | null = el;
+  let depth = 0;
+  while (node && depth < limit && !seen.has(node)) {
+    ancestry.push(node);
+    seen.add(node);
+    const parent = node.parentElement;
+    if (parent) {
+      node = parent;
+    } else {
+      const root = node.getRootNode();
+      if (root instanceof ShadowRoot) {
+        node = root.host ?? null;
+      } else {
+        break;
+      }
+    }
+    depth++;
+  }
+  return ancestry;
+}
+
+function closestCrossBoundary(el: Element, selector: string): Element | null {
+  const ancestry = collectAncestry(el);
+  for (const node of ancestry) {
+    try {
+      if (isHTMLElement(node) && node.matches(selector)) return node;
+    } catch {
+      // ignore selector errors
+    }
+  }
+  return null;
+}
+
+function firstHeadingText(element: Element): string | null {
+  if (headingCache.has(element)) {
+    return headingCache.get(element) ?? null;
+  }
+  let text: string | null = null;
+  if (isHTMLElement(element)) {
+    try {
+      if (element.matches(HEADING_SELECTOR)) {
+        const value = getInnerTextSafe(element).trim();
+        if (value) text = value;
+      }
+    } catch {
+      // ignore
+    }
+  }
+  if (!text) {
+    try {
+      const heading = element.querySelector(HEADING_SELECTOR);
+      if (heading) {
+        const value = getInnerTextSafe(heading).trim();
+        if (value) text = value;
+      }
+    } catch {
+      // ignore
+    }
+  }
+  headingCache.set(element, text);
+  return text;
+}
+
+function findNearestAdjacentHeading(element: Element): string | null {
+  let node: Element | null = element.previousElementSibling;
+  let steps = 0;
+  while (node && steps < 4) {
+    const text = firstHeadingText(node);
+    if (text) return text;
+    node = node.previousElementSibling;
+    steps++;
+  }
+  const parent = element.parentElement;
+  if (parent) {
+    const parentHeading = firstHeadingText(parent);
+    if (parentHeading) return parentHeading;
+  }
+  return null;
+}
+
+function findNearestActionText(element: Element): string | null {
+  if (actionTextCache.has(element)) {
+    return actionTextCache.get(element) ?? null;
+  }
+  let text: string | null = null;
+  const candidates: Element[] = [];
+  try {
+    const direct = element.querySelector(SUBMIT_SELECTOR);
+    if (direct) candidates.push(direct);
+  } catch {
+    // ignore
+  }
+  if (!candidates.length) {
+    let node: Element | null = element.nextElementSibling;
+    let steps = 0;
+    while (node && steps < 3) {
+      if (isSubmitElement(node)) {
+        candidates.push(node);
+        break;
+      }
+      try {
+        const match = node.querySelector(SUBMIT_SELECTOR);
+        if (match) {
+          candidates.push(match);
+          break;
+        }
+      } catch {
+        // ignore
+      }
+      node = node.nextElementSibling;
+      steps++;
+    }
+  }
+  for (const candidate of candidates) {
+    const value = getInnerTextSafe(candidate).trim() || (candidate as HTMLElement).getAttribute('value')?.trim() || '';
+    if (value) {
+      text = value;
+      break;
+    }
+  }
+  actionTextCache.set(element, text);
+  return text;
+}
+
+function normaliseGroupLabel(value: string | null | undefined): string | null {
+  if (!value) return null;
+  const trimmed = value.replace(/\s+/g, ' ').trim();
+  if (!trimmed) return null;
+  return trimmed.slice(0, 160);
+}
+
+function deriveGroupText(
+  anchor: Element,
+  fallback: string,
+  candidateName: string | null,
+  options?: { preferCandidateName?: boolean }
+): { label: string; hint: string | null } {
+  const preferCandidate = options?.preferCandidateName ?? false;
+  const labelFromAttributes = normaliseGroupLabel(getFormGroupLabel(anchor));
+  if (labelFromAttributes) return { label: labelFromAttributes, hint: null };
+
+  const headingInside = normaliseGroupLabel(firstHeadingText(anchor));
+  if (headingInside) return { label: headingInside, hint: null };
+
+  const adjacentHeading = normaliseGroupLabel(findNearestAdjacentHeading(anchor));
+  if (adjacentHeading) return { label: adjacentHeading, hint: null };
+
+  if (preferCandidate) {
+    const candidateLabelPref = normaliseGroupLabel(candidateName);
+    if (candidateLabelPref) return { label: candidateLabelPref, hint: null };
+  }
+
+  const actionText = normaliseGroupLabel(findNearestActionText(anchor));
+  if (actionText) return { label: actionText, hint: null };
+
+  const fallbackLabel = normaliseGroupLabel(fallbackGroupLabel(anchor, fallback));
+  if (fallbackLabel) return { label: fallbackLabel, hint: null };
+
+  const candidateLabel = normaliseGroupLabel(candidateName);
+  if (candidateLabel) return { label: candidateLabel, hint: null };
+
+  return { label: fallback, hint: null };
+}
+
+function buildGroupId(anchor: Element, source: FormGroupSource, framePath: string[]): string {
+  const signature = frameSignatureFromPath(framePath);
+  const anchorPath = getCssPath(anchor);
+  return `${signature}::${source}:${anchorPath}`;
+}
+
+function computeGroupOutlineRect(list: CandidateContext[]): Rect {
+  let top = Number.POSITIVE_INFINITY;
+  let left = Number.POSITIVE_INFINITY;
+  let right = Number.NEGATIVE_INFINITY;
+  let bottom = Number.NEGATIVE_INFINITY;
+  for (const ctx of list) {
+    const rect = ctx.candidate.viewportRect;
+    top = Math.min(top, rect.top);
+    left = Math.min(left, rect.left);
+    right = Math.max(right, rect.right);
+    bottom = Math.max(bottom, rect.bottom);
+  }
+  if (!list.length || !Number.isFinite(top) || !Number.isFinite(left) || !Number.isFinite(right) || !Number.isFinite(bottom)) {
+    return { top: 0, left: 0, right: 0, bottom: 0, width: 0, height: 0 };
+  }
+  return {
+    top,
+    left,
+    right,
+    bottom,
+    width: Math.max(0, right - left),
+    height: Math.max(0, bottom - top)
+  };
+}
+
+function dedupeGroupLabels(groups: FormGroup[]): Map<string, string> {
+  const seen = new Map<string, number>();
+  const labelMap = new Map<string, string>();
+  for (const group of groups) {
+    const key = group.label.toLowerCase();
+    const count = seen.get(key) ?? 0;
+    if (count > 0) {
+      group.label = `${group.label} (${count + 1})`;
+    }
+    seen.set(key, count + 1);
+    labelMap.set(group.id, group.label);
+  }
+  return labelMap;
+}
+
+interface ResolvedGroup {
+  id: string;
+  label: string;
+  hint: string | null;
+  source: FormGroupSource;
+}
+
+function resolveGroupForContext(
+  ctx: CandidateContext,
+  candidateCountMap: WeakMap<Element, number>,
+  frameTotals: Map<string, number>
+): ResolvedGroup {
+  const candidateName = ctx.candidate.accessibleName?.value ?? null;
+  for (const def of STRUCTURAL_GROUP_DEFS) {
+    const anchor = closestCrossBoundary(ctx.element, def.selector);
+    if (!anchor) continue;
+    const { label, hint } = deriveGroupText(anchor, def.fallback, candidateName, { preferCandidateName: false });
+    const id = buildGroupId(anchor, def.source, ctx.candidate.framePath);
+    return { id, label, hint, source: def.source };
+  }
+
+  const ancestry = collectAncestry(ctx.element);
+  const signature = frameSignatureFromPath(ctx.candidate.framePath);
+  const totalInFrame = frameTotals.get(signature) ?? ancestry.length;
+  let bestAncestor: Element | null = ctx.element;
+  let bestSource: FormGroupSource = 'single';
+  let bestScore = Number.POSITIVE_INFINITY;
+
+  for (let depth = 0; depth < ancestry.length; depth++) {
+    const ancestor = ancestry[depth];
+    const count = candidateCountMap.get(ancestor) ?? 0;
+    if (count === 0) continue;
+
+    const isShadowHost = ctx.root instanceof ShadowRoot && ancestor === ctx.root.host;
+    const rect = getBoundingRectSafe(ancestor);
+    const area = rect ? Math.max(rect.width * rect.height, 1) : 1;
+    const normalizedArea = Math.min(area / 400, 600);
+
+    let score = count * 220 + depth * 12 + normalizedArea;
+    if (hasSubmitControl(ancestor)) score -= 90;
+    if (firstHeadingText(ancestor)) score -= 40;
+    if (count === totalInFrame && depth > 0) score += 160;
+
+    let source: FormGroupSource = count > 1 ? 'container' : 'single';
+    if (isShadowHost) source = 'shadow-root';
+
+    if (score < bestScore) {
+      bestScore = score;
+      bestAncestor = ancestor;
+      bestSource = source;
+    }
+  }
+
+  const fallback =
+    bestSource === 'single'
+      ? candidateName || 'Field'
+      : bestSource === 'shadow-root'
+        ? 'Shadow Form'
+        : 'Form Group';
+  const { label, hint } = deriveGroupText(bestAncestor ?? ctx.element, fallback, candidateName, {
+    preferCandidateName: bestSource === 'single'
+  });
+  const id = buildGroupId(bestAncestor ?? ctx.element, bestSource, ctx.candidate.framePath);
+  return { id, label, hint, source: bestSource };
+}
+
+function finaliseFormGroups(contexts: CandidateContext[]): { candidates: Candidate[]; groups: FormGroup[] } {
+  const candidateCountMap = new WeakMap<Element, number>();
+  const frameTotals = new Map<string, number>();
+
+  for (const ctx of contexts) {
+    const ancestors = collectAncestry(ctx.element);
+    const visited = new Set<Element>();
+    for (const ancestor of ancestors) {
+      if (visited.has(ancestor)) continue;
+      visited.add(ancestor);
+      candidateCountMap.set(ancestor, (candidateCountMap.get(ancestor) ?? 0) + 1);
+    }
+    const signature = frameSignatureFromPath(ctx.candidate.framePath);
+    frameTotals.set(signature, (frameTotals.get(signature) ?? 0) + 1);
+  }
+
+  const groupsById = new Map<string, GroupAccumulator>();
+
+  for (const ctx of contexts) {
+    const resolution = resolveGroupForContext(ctx, candidateCountMap, frameTotals);
+    let acc = groupsById.get(resolution.id);
+    if (!acc) {
+      acc = {
+        id: resolution.id,
+        label: resolution.label,
+        hint: resolution.hint,
+        source: resolution.source,
+        framePath: [...ctx.candidate.framePath],
+        rootType: ctx.candidate.rootType,
+        candidates: []
+      };
+      groupsById.set(resolution.id, acc);
+    }
+    acc.candidates.push(ctx);
+    ctx.candidate.formGroupId = resolution.id;
+    ctx.candidate.formGroupLabel = resolution.label;
+  }
+
+  const groups: FormGroup[] = [];
+  for (const acc of groupsById.values()) {
+    const outlineRect = computeGroupOutlineRect(acc.candidates);
+    const fieldCount = acc.candidates.length;
+    groups.push({
+      id: acc.id,
+      label: acc.label,
+      hint: acc.hint,
+      source: acc.source,
+      fieldCount,
+      candidateIds: acc.candidates.map((item) => item.candidate.id),
+      framePath: acc.framePath,
+      rootType: acc.rootType,
+      outlineRect
+    });
+  }
+
+  groups.sort(
+    (a, b) =>
+      a.outlineRect.top - b.outlineRect.top ||
+      a.outlineRect.left - b.outlineRect.left ||
+      b.fieldCount - a.fieldCount
+  );
+
+  const labelMap = dedupeGroupLabels(groups);
+  for (const ctx of contexts) {
+    const label = labelMap.get(ctx.candidate.formGroupId);
+    if (label) ctx.candidate.formGroupLabel = label;
+  }
+  for (const group of groups) {
+    group.label = labelMap.get(group.id) ?? group.label;
+  }
+
+  const candidates = contexts.map((ctx) => ctx.candidate);
+  return { candidates, groups };
+}
+
+function buildCandidate(el: Element, root: Document | ShadowRoot, frameChain: Element[]): CandidateContext | null {
   if (!isFormControl(el)) return null;
 
   const disabled = isDisabled(el);
@@ -558,12 +979,11 @@ function buildCandidate(el: Element, root: Document | ShadowRoot, frameChain: El
 
   const path = getCssPath(el);
   const framePath = frameChain.map((f) => getCssPath(f));
-  const frameSignature = framePath.length ? framePath.join('>') : 'top';
-  const formGroup = computeFormGroupInfo(el);
+  const frameSignature = frameSignatureFromPath(framePath);
   const stableElementId = getStableElementId(el);
   const signature = attributeSignature(el);
   const robustSelector = buildRobustSelector(el, path);
-  const idSegments = [frameSignature, formGroup.id, robustSelector, stableElementId];
+  const idSegments = [frameSignature, robustSelector, stableElementId];
   const id = idSegments.join('||');
 
   const attributes: Record<string, string | null | undefined> = {
@@ -591,7 +1011,7 @@ function buildCandidate(el: Element, root: Document | ShadowRoot, frameChain: El
     ? 'iframe'
     : (root instanceof ShadowRoot ? 'shadow-root' : 'document');
 
-  return {
+  const candidate: Candidate = {
     id,
     path,
     framePath,
@@ -610,8 +1030,15 @@ function buildCandidate(el: Element, root: Document | ShadowRoot, frameChain: El
     description: getDescriptionFromAriaDescribedby(el),
     stableElementId,
     robustSelector,
-    formGroupId: formGroup.id,
-    formGroupLabel: formGroup.label
+    formGroupId: '__pending__',
+    formGroupLabel: null
+  };
+
+  return {
+    element: el,
+    candidate,
+    root,
+    frameChain
   };
 }
 
@@ -655,7 +1082,7 @@ function listSameOriginFrames(root: Document | ShadowRoot): HTMLIFrameElement[] 
 function scanRoot(
   root: Document | ShadowRoot,
   frameChain: Element[],
-  candidates: Candidate[],
+  contexts: CandidateContext[],
   seenKeys: Set<string>
 ) {
   // 1) candidates within this root
@@ -668,11 +1095,12 @@ function scanRoot(
 
   if (nodes) {
     for (const el of Array.from(nodes)) {
-      const cand = buildCandidate(el, root, frameChain);
-      if (!cand) continue;
-      if (seenKeys.has(cand.id)) continue;
-      seenKeys.add(cand.id);
-      candidates.push(cand);
+      const context = buildCandidate(el, root, frameChain);
+      if (!context) continue;
+      const candidateId = context.candidate.id;
+      if (seenKeys.has(candidateId)) continue;
+      seenKeys.add(candidateId);
+      contexts.push(context);
     }
   }
 
@@ -681,7 +1109,7 @@ function scanRoot(
   for (const host of shadowHosts) {
     const hostEl = host as HTMLElement & { shadowRoot?: ShadowRoot | null };
     const sr = hostEl.shadowRoot ?? null;
-    if (sr) scanRoot(sr, frameChain, candidates, seenKeys);
+    if (sr) scanRoot(sr, frameChain, contexts, seenKeys);
   }
 
   // 3) recurse into same-origin iframes
@@ -690,7 +1118,7 @@ function scanRoot(
     try {
       const doc = iframe.contentDocument;
       if (doc) {
-        scanRoot(doc, [...frameChain, iframe], candidates, seenKeys);
+        scanRoot(doc, [...frameChain, iframe], contexts, seenKeys);
       }
     } catch {
       // ignore cross-origin frames
@@ -817,9 +1245,15 @@ export function startDomScanner(options: DomScannerOptions = {}): DomScannerCont
 
   const runScan = () => {
     const start = nowHighRes();
-    const candidates: Candidate[] = [];
+    submitPresenceCache = new WeakMap<Element, boolean>();
+    headingCache = new WeakMap<Element, string | null>();
+    actionTextCache = new WeakMap<Element, string | null>();
+
+    const contexts: CandidateContext[] = [];
     const seenKeys = new Set<string>();
-    scanRoot(document, [], candidates, seenKeys);
+    scanRoot(document, [], contexts, seenKeys);
+
+    const { candidates, groups } = finaliseFormGroups(contexts);
     candidates.sort(
       (a, b) =>
         a.viewportRect.top - b.viewportRect.top ||
@@ -830,6 +1264,7 @@ export function startDomScanner(options: DomScannerOptions = {}): DomScannerCont
     const result: ScanResult = {
       version: ++scanVersion,
       candidates,
+      formGroups: groups,
       scannedAt: nowTs(),
       durationMs
     };
