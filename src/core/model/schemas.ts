@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { normalizeEmail, normalizePhone } from '../../lib/normalize';
 
 export const informationFieldKeys = [
   'web.url',
@@ -16,12 +17,20 @@ export const informationFieldKeys = [
   'contact.city',
   'contact.state',
   'contact.postal_code',
+  'address.line1',
+  'address.line2',
+  'address.city',
+  'address.region',
+  'address.postal_code',
+  'address.country',
   'identity.full_name',
   'identity.first_name',
   'identity.last_name',
   'identity.job_title',
   'identity.company',
   'identity.bio',
+  'organization.name',
+  'organization.title',
   'social.linkedin',
   'social.twitter',
   'social.youtube',
@@ -40,6 +49,8 @@ export interface TemplateFieldInput {
 }
 
 export type TemplateValues = Partial<Record<InformationFieldKey, string>>;
+
+export type ConflictStrategy = 'replace' | 'keep' | 'merge';
 
 export interface TemplateModel {
   id: string;
@@ -86,28 +97,46 @@ const templateUpsertSchema = z
   .object({
     id: z.string().trim().min(1).optional(),
     label: z.string().trim().min(1, 'Template name is required'),
-    fields: z.array(templateFieldSchema).nonempty('Add at least one field')
+    fields: z.array(templateFieldSchema).nonempty('Add at least one field'),
+    conflictStrategy: z.enum(['replace', 'keep', 'merge']).optional()
   })
   .transform((data) => ({
     id: data.id,
     label: data.label,
-    fields: data.fields
+    fields: data.fields,
+    conflictStrategy: (data.conflictStrategy ?? 'replace') as ConflictStrategy
   }));
 
 export type TemplateUpsert = z.infer<typeof templateUpsertSchema>;
 
 function normaliseValue(key: InformationFieldKey, value: string): string {
-  const trimmed = value.trim();
+  const raw = typeof value === 'string' ? value : String(value ?? '');
+  if (!raw) return '';
   if (key === 'contact.email') {
-    return trimmed.toLowerCase();
+    return normalizeEmail(raw);
   }
+  if (key === 'contact.phone') {
+    return normalizePhone(raw);
+  }
+  const trimmed = raw.trim();
+  if (!trimmed) return '';
   if (key === 'identity.full_name' || key === 'identity.first_name' || key === 'identity.last_name') {
+    return trimmed.replace(/\s+/g, ' ');
+  }
+  if (key.startsWith('address.')) {
     return trimmed.replace(/\s+/g, ' ').trim();
   }
   return trimmed;
 }
 
-export function normaliseTemplateInput(input: unknown): { id?: string; label: string; values: TemplateValues } {
+export interface NormalisedTemplateInput {
+  id?: string;
+  label: string;
+  values: TemplateValues;
+  conflictStrategy: ConflictStrategy;
+}
+
+export function normaliseTemplateInput(input: unknown): NormalisedTemplateInput {
   const parsed = templateUpsertSchema.parse(input);
   const values: TemplateValues = {};
   for (const field of parsed.fields) {
@@ -122,7 +151,8 @@ export function normaliseTemplateInput(input: unknown): { id?: string; label: st
   return {
     id: parsed.id,
     label: parsed.label.trim(),
-    values
+    values,
+    conflictStrategy: (parsed.conflictStrategy ?? 'replace') as ConflictStrategy
   };
 }
 

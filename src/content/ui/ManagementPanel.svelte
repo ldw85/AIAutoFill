@@ -17,6 +17,7 @@
   } from './state';
   import type { CandidateView } from './state';
   import FormsTab from './FormsTab.svelte';
+  import ExtractPersonalPanel from '../../ui/overlay/ExtractPersonalPanel.svelte';
   import ExtractSeoPanel from '../../ui/overlay/ExtractSeoPanel.svelte';
   import type { BatchMatchResult, MatchResult } from '../../lib/fieldMatcher';
   import {
@@ -34,7 +35,7 @@
     buildPreferenceInputsFromSelection
   } from '../learning';
 
-  let tab: 'forms' | 'preview' | 'seo' | 'templates' = 'forms';
+  let tab: 'forms' | 'preview' | 'personal' | 'seo' | 'templates' = 'forms';
   let passphrase = '';
   let templateName = '';
   let saving = false;
@@ -276,6 +277,7 @@
     <div class="tabs">
       <button class:active={tab==='forms'} on:click={() => tab='forms'}>Forms</button>
       <button class:active={tab==='preview'} on:click={() => tab='preview'}>Preview</button>
+      <button class:active={tab==='personal'} on:click={() => tab='personal'}>Personal</button>
       <button class:active={tab==='seo'} on:click={() => tab='seo'}>SEO</button>
       <button class:active={tab==='templates'} on:click={() => tab='templates'}>Templates</button>
     </div>
@@ -312,6 +314,10 @@
         <button on:click={() => applyAll()}>Apply All</button>
         <button on:click={() => undoAll()}>Undo All</button>
       </footer>
+    </div>
+  {:else if tab === 'personal'}
+    <div class="body">
+      <ExtractPersonalPanel />
     </div>
   {:else if tab === 'seo'}
     <div class="body">

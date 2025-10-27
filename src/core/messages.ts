@@ -1,4 +1,5 @@
 import type {
+  ConflictStrategy,
   Mode,
   RuntimeSettings,
   SiteOverride,
@@ -37,6 +38,7 @@ export interface TemplateSavePayload {
   id?: string;
   label: string;
   fields: TemplateFieldInput[];
+  conflictStrategy?: ConflictStrategy;
 }
 
 export interface TemplateListResult {
