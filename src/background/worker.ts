@@ -10,7 +10,14 @@ import type {
   TemplateDeleteResult,
   SettingsSnapshot
 } from '../core/messages';
-import type { Mode, RuntimeSettings, TemplateModel, TemplateValues } from '../core/model/schemas';
+import type {
+  ConflictStrategy,
+  InformationFieldKey,
+  Mode,
+  RuntimeSettings,
+  TemplateModel,
+  TemplateValues
+} from '../core/model/schemas';
 import {
   DEFAULT_RUNTIME_SETTINGS,
   effectiveMode,
@@ -60,6 +67,71 @@ interface SecretsRecord {
 interface TemplatePayloadV1 {
   values: TemplateValues;
   version?: number;
+}
+
+function hasNonEmptyValue(value: string | undefined): boolean {
+  return typeof value === 'string' && value.trim().length > 0;
+}
+
+function filterNonEmptyValues(values: TemplateValues): TemplateValues {
+  const result: TemplateValues = {};
+  for (const key of Object.keys(values) as InformationFieldKey[]) {
+    const value = values[key];
+    if (hasNonEmptyValue(value)) {
+      result[key] = value as string;
+    }
+  }
+  return result;
+}
+
+function mergeTemplateValues(base: TemplateValues, incoming: TemplateValues, strategy: ConflictStrategy): TemplateValues {
+  if (strategy === 'replace') {
+    return filterNonEmptyValues(incoming);
+  }
+  const result: TemplateValues = filterNonEmptyValues(base);
+  if (strategy === 'keep') {
+    for (const key of Object.keys(incoming) as InformationFieldKey[]) {
+      const value = incoming[key];
+      if (!hasNonEmptyValue(value)) continue;
+      if (!hasNonEmptyValue(result[key])) {
+        result[key] = value as string;
+      }
+    }
+    return result;
+  }
+  for (const key of Object.keys(incoming) as InformationFieldKey[]) {
+    const value = incoming[key];
+    if (!hasNonEmptyValue(value)) continue;
+    const incomingValue = value as string;
+    const existing = result[key];
+    if (!hasNonEmptyValue(existing)) {
+      result[key] = incomingValue;
+      continue;
+    }
+    const existingValue = existing as string;
+    if (existingValue.toLowerCase() === incomingValue.toLowerCase()) {
+      continue;
+    }
+    const parts = existingValue
+      .split('•')
+      .map((part) => part.trim())
+      .filter((part) => part.length > 0);
+    const lower = new Set(parts.map((part) => part.toLowerCase()));
+    if (!lower.has(incomingValue.toLowerCase())) {
+      parts.push(incomingValue);
+    }
+    result[key] = parts.join(' • ');
+  }
+  return result;
+}
+
+function hasPopulatedValues(values: TemplateValues): boolean {
+  for (const key of Object.keys(values) as InformationFieldKey[]) {
+    if (hasNonEmptyValue(values[key])) {
+      return true;
+    }
+  }
+  return false;
 }
 
 class WorkerError extends Error {
@@ -260,13 +332,26 @@ async function listTemplatesForKey(key: CryptoKey): Promise<TemplateModel[]> {
 async function saveTemplateWithKey(payload: TemplateSavePayload, key: CryptoKey): Promise<{ template: TemplateModel; templates: TemplateModel[] }> {
   const normalised = normaliseTemplateInput(payload);
   const id = normalised.id?.trim() || generateTemplateId();
-  const existing = await readTemplate(id);
+  const existingRecord = await readTemplate(id);
+  let existingValues: TemplateValues = {};
+  if (existingRecord) {
+    try {
+      const decoded = await decryptJson<TemplatePayloadV1>(existingRecord.payload, key);
+      existingValues = decoded?.values ?? {};
+    } catch {
+      throw new WorkerError('DECRYPT_FAILED', 'Unable to decrypt template.');
+    }
+  }
+  const mergedValues = mergeTemplateValues(existingValues, normalised.values, normalised.conflictStrategy);
+  if (!hasPopulatedValues(mergedValues)) {
+    throw new WorkerError('EMPTY_TEMPLATE', 'Add at least one populated field');
+  }
   const now = Date.now();
-  const encrypted = await encryptJson<TemplatePayloadV1>({ values: normalised.values }, key);
+  const encrypted = await encryptJson<TemplatePayloadV1>({ values: mergedValues }, key);
   const record: TemplateRecord = {
     id,
     label: normalised.label,
-    createdAt: existing?.createdAt ?? now,
+    createdAt: existingRecord?.createdAt ?? now,
     updatedAt: now,
     payload: encrypted
   };
@@ -277,7 +362,7 @@ async function saveTemplateWithKey(payload: TemplateSavePayload, key: CryptoKey)
     label: record.label,
     createdAt: record.createdAt,
     updatedAt: record.updatedAt,
-    values: normalised.values
+    values: mergedValues
   };
   return { template, templates };
 }
