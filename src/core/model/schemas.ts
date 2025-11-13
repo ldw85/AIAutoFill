@@ -30,7 +30,28 @@ export const informationFieldKeys = [
 
 const informationFieldSet = new Set<string>(informationFieldKeys);
 
+export function isKnownInformationKey(value: string): value is InformationFieldKey {
+  return informationFieldSet.has(value);
+}
+
 export type InformationFieldKey = (typeof informationFieldKeys)[number];
+
+const TEMPLATE_KEY_PATTERN = /^[A-Za-z0-9._-]+$/;
+
+export const keyFormatHint =
+  'Keys can include letters, numbers, dots, underscores, or hyphens (e.g., identity.full_name).';
+
+export function normalizeKey(input: string): string {
+  if (typeof input !== 'string') return '';
+  const trimmed = input.trim();
+  if (!trimmed) return '';
+  return trimmed.replace(/\s+/g, '_');
+}
+
+export function isValidTemplateKey(input: string): boolean {
+  if (!input) return false;
+  return TEMPLATE_KEY_PATTERN.test(input);
+}
 
 export type Mode = 'offline' | 'semantic';
 
@@ -39,7 +60,7 @@ export interface TemplateFieldInput {
   value: string;
 }
 
-export type TemplateValues = Partial<Record<InformationFieldKey, string>>;
+export type TemplateValues = Record<string, string>;
 
 export interface TemplateModel {
   id: string;
@@ -66,21 +87,16 @@ export const DEFAULT_RUNTIME_SETTINGS: RuntimeSettings = {
   semanticEndpoint: ''
 };
 
-const templateFieldSchema = z
-  .object({
-    key: z
-      .string()
-      .trim()
-      .min(1, 'Key is required')
-      .refine((val) => informationFieldSet.has(val), {
-        message: 'Unsupported field key'
-      }),
-    value: z.string().trim().min(1, 'Value is required')
-  })
-  .transform((field) => ({
-    key: field.key as InformationFieldKey,
-    value: field.value
-  }));
+const templateFieldSchema = z.object({
+  key: z
+    .string()
+    .transform((value) => normalizeKey(value))
+    .refine((value) => value.length > 0, { message: 'Key is required' })
+    .refine((value) => isValidTemplateKey(value), {
+      message: 'Keys may include letters, numbers, dots, underscores, or hyphens'
+    }),
+  value: z.string().trim().min(1, 'Value is required')
+});
 
 const templateUpsertSchema = z
   .object({
@@ -96,8 +112,9 @@ const templateUpsertSchema = z
 
 export type TemplateUpsert = z.infer<typeof templateUpsertSchema>;
 
-function normaliseValue(key: InformationFieldKey, value: string): string {
+function normaliseValue(key: string, value: string): string {
   const trimmed = value.trim();
+  if (!trimmed) return '';
   if (key === 'contact.email') {
     return trimmed.toLowerCase();
   }
