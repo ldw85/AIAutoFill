@@ -1,0 +1,94 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <meta http-equiv="X-UA-Compatible" content="IE=edge" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>AIAutoFill Settings</title>
+    <style>
+      body { font-family: system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif; margin: 2rem; }
+      .card { border: 1px solid #ddd; border-radius: 8px; padding: 1rem 1.25rem; margin-bottom: 1rem; }
+      .row { display: flex; flex-direction: row; gap: .5rem; align-items: center; }
+      label { display: block; margin-bottom: .25rem; font-weight: 600; }
+      input[type="password"], input[type="text"], input[type="number"] { width: 100%; padding: .5rem; border-radius: 6px; border: 1px solid #ccc; }
+      button { padding: .5rem .75rem; border-radius: 6px; border: 1px solid #0077ff; background: #0b79ff; color: #fff; cursor: pointer; }
+      button.secondary { background: #fff; color: #0b79ff; }
+      .muted { color: #666; font-size: .9rem; }
+      .ok { color: #0a7a00; }
+      .error { color: #b00020; }
+      .hidden { display: none; }
+      .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 1rem; }
+      @media (max-width: 900px) { .grid { grid-template-columns: 1fr; } }
+    </style>
+  </head>
+  <body>
+    <h1>AIAutoFill — Settings</h1>
+
+    <div id="status" class="card">
+      <div>Passphrase status: <strong id="status-text" class="muted">Loading…</strong></div>
+      <div class="muted" id="status-detail"></div>
+    </div>
+
+    <div id="setup" class="card hidden">
+      <h2>Set a passphrase</h2>
+      <p class="muted">Your data will be encrypted using AES‑GCM with a key derived from your passphrase using PBKDF2. The key is kept in memory and never stored. Remember your passphrase — losing it means losing access to your encrypted data.</p>
+      <div>
+        <label for="new-passphrase">New passphrase</label>
+        <input id="new-passphrase" type="password" autocomplete="new-password" />
+      </div>
+      <div>
+        <label for="new-passphrase-confirm">Confirm passphrase</label>
+        <input id="new-passphrase-confirm" type="password" autocomplete="new-password" />
+      </div>
+      <div class="grid">
+        <div>
+          <label for="iterations">PBKDF2 iterations</label>
+          <input id="iterations" type="number" min="50000" step="1000" value="250000" />
+          <div class="muted">Higher = slower but more secure. Default 250,000.</div>
+        </div>
+        <div>
+          <label for="salt-bytes">Salt bytes</label>
+          <input id="salt-bytes" type="number" min="8" step="1" value="16" />
+          <div class="muted">Length of random salt to generate for the KDF.</div>
+        </div>
+      </div>
+      <div class="row" style="margin-top: .75rem;">
+        <button id="btn-set">Set passphrase</button>
+      </div>
+      <div id="setup-msg" class="muted"></div>
+    </div>
+
+    <div id="change" class="card hidden">
+      <h2>Change passphrase</h2>
+      <div>
+        <label for="current-passphrase">Current passphrase</label>
+        <input id="current-passphrase" type="password" autocomplete="current-password" />
+      </div>
+      <div>
+        <label for="change-new-passphrase">New passphrase</label>
+        <input id="change-new-passphrase" type="password" autocomplete="new-password" />
+      </div>
+      <div>
+        <label for="change-new-passphrase-confirm">Confirm new passphrase</label>
+        <input id="change-new-passphrase-confirm" type="password" autocomplete="new-password" />
+      </div>
+      <div class="row" style="margin-top: .75rem;">
+        <button id="btn-change">Change passphrase</button>
+        <button id="btn-verify" class="secondary">Verify current</button>
+      </div>
+      <div id="change-msg" class="muted"></div>
+    </div>
+
+    <div id="devtools" class="card hidden">
+      <h2>Development tools</h2>
+      <div class="row">
+        <button id="btn-encrypt-sample" class="secondary">Encrypt sample item</button>
+        <button id="btn-list" class="secondary">List keys</button>
+        <button id="btn-clear" class="secondary">Clear all data</button>
+      </div>
+      <pre id="dev-output" class="muted"></pre>
+    </div>
+
+    <script type="module" src="./options.js"></script>
+  </body>
+</html>
